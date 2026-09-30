@@ -261,7 +261,16 @@ export default function App() {
   const [showLoginPassword, setShowLoginPassword] = useState(false);
   const [loginFullName, setLoginFullName] = useState('');
   const [loginRole, setLoginRole] = useState<UserRole>('timekeeper');
-  const [isRegisterMode, setIsRegisterMode] = useState(false);
+  const [isRegisterMode, setIsRegisterMode] = useState(() => {
+    try {
+      const saved = localStorage.getItem('loki_managed_users');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return false;
+      }
+    } catch {}
+    return true;
+  });
   const [loginError, setLoginError] = useState('');
   const [loginSuccess, setLoginSuccess] = useState('');
   const [isSyncing, setIsSyncing] = useState(false);
@@ -343,22 +352,6 @@ export default function App() {
     return 'variant';
   };
 
-  const DEFAULT_TIMEKEEPER: ManagedUser = {
-    id: 'user-master-timekeeper',
-    email: 'timekeeper@agency.com',
-    fullName: 'Master Timekeeper',
-    role: 'timekeeper',
-    isActive: true,
-    companyEmail: 'timekeeper@agency.com',
-    personalEmail: 'tk.admin@agency.com',
-    phoneNumber: '+1-555-0100',
-    roleInCompany: 'Managing Director & Timekeeper',
-    assignedClients: [],
-    assignedPlatforms: {},
-    supervisingTimekeepers: [],
-    passwordHash: '$pbkdf2$100000$f9f855dc14ff8c9b521f7fed62a9223b$209a8aa0bb2411a8cec4dfb1fb9d971678e31a625f4477e959e7e06ce9440835',
-  };
-
   // Managed Users (Normalized to canonical 3 roles, passwords cryptographically hashed)
   const [managedUsers, setManagedUsers] = useState<ManagedUser[]>(() => {
     const saved = localStorage.getItem('loki_managed_users');
@@ -366,26 +359,16 @@ export default function App() {
       try {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          const normalized = parsed.map((u: any) => {
-            const userObj = {
-              ...u,
-              role: normalizeRole(u.role),
-            };
-            if (userObj.email.toLowerCase() === 'timekeeper@agency.com') {
-              userObj.passwordHash = DEFAULT_TIMEKEEPER.passwordHash;
-            }
-            return userObj;
-          });
-          if (!normalized.some((u) => u.email.toLowerCase() === 'timekeeper@agency.com')) {
-            normalized.unshift(DEFAULT_TIMEKEEPER);
-          }
-          return normalized;
+          return parsed.map((u: any) => ({
+            ...u,
+            role: normalizeRole(u.role),
+          }));
         }
       } catch {
         // fallback
       }
     }
-    return [DEFAULT_TIMEKEEPER];
+    return [];
   });
 
   // Deletion Requests & Override Requests
@@ -450,6 +433,10 @@ export default function App() {
   // Sync with Firestore Cloud
   const syncWithFirebaseCloud = async () => {
     setIsSyncing(true);
+    if (!LokiFirebaseService.isConfigured()) {
+      setIsSyncing(false);
+      return;
+    }
     try {
       const cloudUsers = await LokiFirebaseService.listUsers();
       if (cloudUsers && cloudUsers.length > 0) {
@@ -457,27 +444,7 @@ export default function App() {
           ...u,
           role: normalizeRole(u.role),
         }));
-        if (!normalized.some((u: any) => u.email.toLowerCase() === 'timekeeper@agency.com')) {
-          normalized.unshift(DEFAULT_TIMEKEEPER);
-        }
         setManagedUsers(normalized as ManagedUser[]);
-      } else {
-        const defaultAdmin: ManagedUser = {
-          id: 'user-master-timekeeper',
-          email: 'timekeeper@agency.com',
-          fullName: 'Master Timekeeper',
-          role: 'timekeeper',
-          isActive: true,
-          companyEmail: 'timekeeper@agency.com',
-          personalEmail: 'tk.admin@agency.com',
-          phoneNumber: '+1-555-0100',
-          roleInCompany: 'Managing Director & Timekeeper',
-          assignedClients: [],
-          assignedPlatforms: {},
-          supervisingTimekeepers: [],
-          passwordHash: 'Timekeeper1234#',
-        };
-        await LokiFirebaseService.saveUserProfile(defaultAdmin as any);
       }
 
       const cloudClients = await LokiFirebaseService.listClients();
@@ -756,13 +723,7 @@ export default function App() {
     }
 
     // Login verification
-    let found = managedUsers.find((u) => u.email.toLowerCase() === loginEmail.trim().toLowerCase());
-    if (!found && loginEmail.trim().toLowerCase() === 'timekeeper@agency.com') {
-      found = DEFAULT_TIMEKEEPER;
-    }
-    if (!found && loginEmail.trim().toLowerCase() === 'admin@agency.com') {
-      found = { ...DEFAULT_TIMEKEEPER, email: 'admin@agency.com', fullName: 'System Administrator' };
-    }
+    const found = managedUsers.find((u) => u.email.toLowerCase() === loginEmail.trim().toLowerCase());
 
     if (!found) {
       setLoginError('Invalid email or password credentials. Contact your Timekeeper.');
@@ -1780,19 +1741,15 @@ export default function App() {
               {isRegisterMode ? 'Register Account' : isDedicatedTK ? 'Authenticate Timekeeper' : 'Login to Vault'}
             </button>
 
-            {!isRegisterMode && (
-              <div className="bg-[#0C100E] border border-[#252B26] p-2.5 rounded-lg text-[11px] text-[#A5AAA1] flex items-center justify-between">
-                <span>Default Timekeeper: <strong className="text-[#E9E8DF]">timekeeper@agency.com</strong></span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setLoginEmail('timekeeper@agency.com');
-                    setLoginPassword('Timekeeper1234#');
-                  }}
-                  className="text-[#3FAF63] hover:underline font-semibold"
-                >
-                  Quick Fill
-                </button>
+            {!isRegisterMode && managedUsers.length === 0 && (
+              <div className="bg-[#102719] border border-[#45C46B]/40 text-[#75F09A] p-3 rounded-lg text-xs space-y-1">
+                <div className="font-semibold flex items-center space-x-1.5">
+                  <ShieldCheck className="w-4 h-4" />
+                  <span>First-Time Setup</span>
+                </div>
+                <p className="text-[11px] text-[#A5AAA1]">
+                  No administrative account exists yet. Click "Setup first Timekeeper Account" below to create your master account.
+                </p>
               </div>
             )}
           </form>

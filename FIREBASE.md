@@ -26,12 +26,12 @@ When developing in CI/CD, staging, or without MCP access:
 - Copy `.env.example` to `.env`.
 - Supply standard environment variables:
   ```bash
-  VITE_FIREBASE_PROJECT_ID=loki-agency-vault
-  VITE_FIREBASE_API_KEY=AIzaSy...
-  VITE_FIREBASE_AUTH_DOMAIN=loki-agency-vault.firebaseapp.com
-  VITE_FIREBASE_STORAGE_BUCKET=loki-agency-vault.firebasestorage.app
-  VITE_FIREBASE_MESSAGING_SENDER_ID=362141834407
-  VITE_FIREBASE_APP_ID=1:362141834407:web:fcccca568b840ac0a68f82
+  VITE_FIREBASE_PROJECT_ID=your-project-id
+  VITE_FIREBASE_API_KEY=your-firebase-api-key
+  VITE_FIREBASE_AUTH_DOMAIN=your-project-id.firebaseapp.com
+  VITE_FIREBASE_STORAGE_BUCKET=your-project-id.firebasestorage.app
+  VITE_FIREBASE_MESSAGING_SENDER_ID=your-messaging-sender-id
+  VITE_FIREBASE_APP_ID=your-firebase-app-id
   ```
 - The application automatically falls back to these variables, requiring zero code modifications.
 

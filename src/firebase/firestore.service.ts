@@ -62,14 +62,25 @@ export interface LokiFirestoreUser {
 
 /**
  * Loki Firebase NoSQL Storage Service
- * Strictly operates on the isolated project `loki-agency-vault`
+ * Strictly operates on the isolated project configured via environment variables.
  * Implements client separation where each client has its own dedicated collection/sub-tables
  * containing platform name & encrypted password records.
  */
 export class LokiFirebaseService {
   private static dbInstance: Firestore | null = null;
 
-  public static getDb(): Firestore {
+  public static isConfigured(): boolean {
+    return Boolean(
+      firebaseConfig.projectId &&
+      firebaseConfig.apiKey &&
+      firebaseConfig.apiKey.trim().length > 0
+    );
+  }
+
+  public static getDb(): Firestore | null {
+    if (!this.isConfigured()) {
+      return null;
+    }
     if (!this.dbInstance) {
       const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
       this.dbInstance = getFirestore(app);
@@ -82,6 +93,7 @@ export class LokiFirebaseService {
    */
   public static async saveClient(client: ClientProfile): Promise<void> {
     const firestore = this.getDb();
+    if (!firestore) return;
     const clientRef = doc(firestore, 'clients', client.id);
     await setDoc(clientRef, {
       ...client,
@@ -94,6 +106,7 @@ export class LokiFirebaseService {
    */
   public static async listClients(): Promise<ClientProfile[]> {
     const firestore = this.getDb();
+    if (!firestore) return [];
     const clientsRef = collection(firestore, 'clients');
     const snapshot = await getDocs(clientsRef);
     return snapshot.docs.map((docSnap) => docSnap.data() as ClientProfile);
@@ -108,6 +121,7 @@ export class LokiFirebaseService {
     cred: ClientPlatformCredential
   ): Promise<void> {
     const firestore = this.getDb();
+    if (!firestore) return;
     const credRef = doc(firestore, 'clients', clientId, 'platforms', cred.id);
     await setDoc(credRef, {
       ...cred,
@@ -123,6 +137,7 @@ export class LokiFirebaseService {
     clientId: string
   ): Promise<ClientPlatformCredential[]> {
     const firestore = this.getDb();
+    if (!firestore) return [];
     const platformsRef = collection(firestore, 'clients', clientId, 'platforms');
     const snapshot = await getDocs(platformsRef);
     return snapshot.docs.map((docSnap) => docSnap.data() as ClientPlatformCredential);
@@ -136,6 +151,7 @@ export class LokiFirebaseService {
     platformId: string
   ): Promise<void> {
     const firestore = this.getDb();
+    if (!firestore) return;
     const credRef = doc(firestore, 'clients', clientId, 'platforms', platformId);
     await deleteDoc(credRef);
   }
@@ -145,6 +161,7 @@ export class LokiFirebaseService {
    */
   public static async saveUserProfile(user: LokiFirestoreUser & { passwordHash?: string }): Promise<void> {
     const firestore = this.getDb();
+    if (!firestore) return;
     const userRef = doc(firestore, 'users', user.id);
     await setDoc(userRef, {
       ...user,
@@ -157,6 +174,7 @@ export class LokiFirebaseService {
    */
   public static async getUserProfile(userId: string): Promise<any | null> {
     const firestore = this.getDb();
+    if (!firestore) return null;
     const userRef = doc(firestore, 'users', userId);
     const snap = await getDoc(userRef);
     return snap.exists() ? snap.data() : null;
@@ -167,6 +185,7 @@ export class LokiFirebaseService {
    */
   public static async listUsers(): Promise<any[]> {
     const firestore = this.getDb();
+    if (!firestore) return [];
     const usersRef = collection(firestore, 'users');
     const snapshot = await getDocs(usersRef);
     return snapshot.docs.map((docSnap) => docSnap.data());
@@ -177,6 +196,7 @@ export class LokiFirebaseService {
    */
   public static async deleteUser(userId: string): Promise<void> {
     const firestore = this.getDb();
+    if (!firestore) return;
     const userRef = doc(firestore, 'users', userId);
     await deleteDoc(userRef);
   }
@@ -186,6 +206,7 @@ export class LokiFirebaseService {
    */
   public static async deleteClient(clientId: string): Promise<void> {
     const firestore = this.getDb();
+    if (!firestore) return;
     const clientRef = doc(firestore, 'clients', clientId);
     await deleteDoc(clientRef);
   }
@@ -195,6 +216,7 @@ export class LokiFirebaseService {
    */
   public static async saveOverrideRequest(req: PasswordOverrideRequest | any): Promise<void> {
     const firestore = this.getDb();
+    if (!firestore) return;
     const reqRef = doc(firestore, 'override_requests', req.id);
     await setDoc(reqRef, {
       ...req,
@@ -207,6 +229,7 @@ export class LokiFirebaseService {
    */
   public static async listOverrideRequests(): Promise<any[]> {
     const firestore = this.getDb();
+    if (!firestore) return [];
     const reqsRef = collection(firestore, 'override_requests');
     const snapshot = await getDocs(reqsRef);
     return snapshot.docs.map((d) => d.data());
@@ -217,6 +240,7 @@ export class LokiFirebaseService {
    */
   public static async saveDeletionRequest(req: DeletionRequest): Promise<void> {
     const firestore = this.getDb();
+    if (!firestore) return;
     const reqRef = doc(firestore, 'deletion_requests', req.id);
     await setDoc(reqRef, {
       ...req,
@@ -229,6 +253,7 @@ export class LokiFirebaseService {
    */
   public static async listDeletionRequests(): Promise<DeletionRequest[]> {
     const firestore = this.getDb();
+    if (!firestore) return [];
     const reqsRef = collection(firestore, 'deletion_requests');
     const snapshot = await getDocs(reqsRef);
     return snapshot.docs.map((d) => d.data() as DeletionRequest);
@@ -239,6 +264,7 @@ export class LokiFirebaseService {
    */
   public static async saveAuditLog(entry: any): Promise<void> {
     const firestore = this.getDb();
+    if (!firestore) return;
     const logRef = doc(firestore, 'audit_logs', entry.id);
     await setDoc(logRef, entry, { merge: true });
   }
@@ -248,6 +274,7 @@ export class LokiFirebaseService {
    */
   public static async listAuditLogs(): Promise<any[]> {
     const firestore = this.getDb();
+    if (!firestore) return [];
     const logsRef = collection(firestore, 'audit_logs');
     const snapshot = await getDocs(logsRef);
     return snapshot.docs.map((d) => d.data());

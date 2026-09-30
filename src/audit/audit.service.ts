@@ -37,7 +37,21 @@ const FORBIDDEN_LOG_KEYS = [
  * - Anti-tampering signature
  */
 export class LokiAuditService {
-  private static hmacSecret = process.env.AUDIT_HMAC_SECRET || 'loki-production-audit-secret-hmac-2026';
+  private static fallbackHmacSecret: string | null = null;
+
+  public static getHmacSecret(): string {
+    if (process.env.AUDIT_HMAC_SECRET && process.env.AUDIT_HMAC_SECRET.trim().length >= 16) {
+      return process.env.AUDIT_HMAC_SECRET.trim();
+    }
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('FATAL: AUDIT_HMAC_SECRET environment variable must be configured in production with at least 16 characters.');
+    }
+    if (!this.fallbackHmacSecret) {
+      this.fallbackHmacSecret = crypto.randomBytes(32).toString('hex');
+    }
+    return this.fallbackHmacSecret;
+  }
+
   private static genesisHash = '0000000000000000000000000000000000000000000000000000000000000000';
   private static auditLogs: AuditRecord[] = [];
 
@@ -65,7 +79,7 @@ export class LokiAuditService {
    */
   static computeSignature(prevHash: string, data: Omit<AuditRecord, 'signature' | 'prevHash'>): string {
     const serialized = `${prevHash}|${data.id}|${data.orgId}|${data.userId || ''}|${data.action}|${data.resourceType}|${data.resourceId || ''}|${data.timestamp}|${JSON.stringify(data.metadata)}`;
-    return crypto.createHmac('sha256', this.hmacSecret).update(serialized).digest('hex');
+    return crypto.createHmac('sha256', this.getHmacSecret()).update(serialized).digest('hex');
   }
 
   /**

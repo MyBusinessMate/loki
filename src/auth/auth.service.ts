@@ -4,8 +4,21 @@ import argon2 from 'argon2';
 import { db } from '../db/database.js';
 import { User, SessionRecord, OrgRole } from '../types/models.js';
 import { LokiAuditService } from '../audit/audit.service.js';
+let fallbackEphemeralJwtSecret: string | null = null;
 
-const JWT_SECRET = process.env.JWT_SECRET || 'loki-production-jwt-signing-secret-2026-strict-key';
+export function getJwtSecret(): string {
+  if (process.env.JWT_SECRET && process.env.JWT_SECRET.trim().length >= 32) {
+    return process.env.JWT_SECRET.trim();
+  }
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('FATAL: JWT_SECRET environment variable must be configured in production with at least 32 characters.');
+  }
+  if (!fallbackEphemeralJwtSecret) {
+    fallbackEphemeralJwtSecret = crypto.randomBytes(32).toString('hex');
+  }
+  return fallbackEphemeralJwtSecret;
+}
+
 const ACCESS_TOKEN_TTL = '15m';
 const REFRESH_TOKEN_DAYS = 7;
 
@@ -196,7 +209,7 @@ export class LokiAuthService {
         role,
         sessionId,
       },
-      JWT_SECRET,
+      getJwtSecret(),
       { expiresIn: ACCESS_TOKEN_TTL }
     );
 
@@ -258,7 +271,7 @@ export class LokiAuthService {
    */
   static verifyAccessToken(token: string): AuthContext {
     try {
-      const decoded = jwt.verify(token, JWT_SECRET) as any;
+      const decoded = jwt.verify(token, getJwtSecret()) as any;
       const session = db.sessions.get(decoded.sessionId);
       if (!session || session.revoked || new Date(session.expiresAt) < new Date()) {
         throw new Error('Session revoked or expired');
