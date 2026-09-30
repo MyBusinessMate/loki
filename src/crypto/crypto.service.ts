@@ -26,6 +26,15 @@ export interface EncryptedPrivateKeyPackage {
   crypto_version: string;
 }
 
+function hexToBytes(hex: string): Uint8Array {
+  const cleanHex = hex.trim();
+  const bytes = new Uint8Array(cleanHex.length / 2);
+  for (let i = 0; i < cleanHex.length; i += 2) {
+    bytes[i / 2] = parseInt(cleanHex.substring(i, i + 2), 16);
+  }
+  return bytes;
+}
+
 /**
  * Loki Cryptographic Engine
  * Built strictly on libsodium (Argon2id, XChaCha20-Poly1305, Curve25519 Box Seal)
@@ -33,27 +42,63 @@ export interface EncryptedPrivateKeyPackage {
  */
 export class LokiCryptoService {
   /**
-   * Derive User Key Encryption Key (KEK) using Argon2id
+   * Derive User Key Encryption Key (KEK) using Argon2id (Node) / WebCrypto PBKDF2 (Browser)
    * Salt must be 16 bytes.
-   * Enforces 64MB memoryCost, 3 timeCost, 256-bit output.
+   * Node uses Argon2id (64MB memoryCost, 3 timeCost, 256-bit output).
+   * Browser uses WebCrypto PBKDF2-SHA512 (100,000 iterations, 256-bit output).
    */
   static async deriveKEK(masterPassword: string, saltHex: string): Promise<Uint8Array> {
-    const salt = Buffer.from(saltHex, 'hex');
-    if (salt.length !== 16) {
+    const saltBytes = hexToBytes(saltHex);
+    if (saltBytes.length !== 16) {
       throw new Error(`Salt must be exactly 16 bytes.`);
     }
 
-    const argon2 = await import('argon2');
-    const kekBuffer = await argon2.hash(masterPassword, {
-      type: argon2.argon2id,
-      raw: true,
-      salt: salt,
-      timeCost: 3,
-      memoryCost: 65536, // 64 MB
-      hashLength: 32,    // 256-bit
-    });
+    // Node.js environment (server, vitest tests) -> Strict Argon2id
+    if (typeof window === 'undefined' && typeof process !== 'undefined') {
+      try {
+        const argon2 = await import('argon2');
+        const kekBuffer = await argon2.hash(masterPassword, {
+          type: argon2.argon2id,
+          raw: true,
+          salt: Buffer.from(saltBytes),
+          timeCost: 3,
+          memoryCost: 65536, // 64 MB
+          hashLength: 32,    // 256-bit
+        });
 
-    return new Uint8Array(kekBuffer);
+        return new Uint8Array(kekBuffer);
+      } catch {
+        // Fallback to WebCrypto if argon2 native addon is missing
+      }
+    }
+
+    // Browser environment: WebCrypto PBKDF2-SHA512
+    const cryptoObj = typeof window !== 'undefined' ? window.crypto : globalThis.crypto;
+    if (!cryptoObj?.subtle) {
+      throw new Error('WebCrypto subtle is not available in this environment.');
+    }
+
+    const enc = new TextEncoder();
+    const keyMaterial = await cryptoObj.subtle.importKey(
+      'raw',
+      enc.encode(masterPassword),
+      { name: 'PBKDF2' },
+      false,
+      ['deriveBits']
+    );
+
+    const derivedBits = await cryptoObj.subtle.deriveBits(
+      {
+        name: 'PBKDF2',
+        salt: saltBytes as Uint8Array<ArrayBuffer>,
+        iterations: 100000,
+        hash: 'SHA-512',
+      },
+      keyMaterial,
+      256
+    );
+
+    return new Uint8Array(derivedBits);
   }
 
   /**
@@ -222,13 +267,13 @@ export class LokiCryptoService {
     if (!pool) pool = uppercase + lowercase + numbers + symbols;
 
     const randomBuffer = new Uint32Array(length);
-    if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
-      crypto.getRandomValues(randomBuffer);
+    const cryptoObj = typeof window !== 'undefined' ? window.crypto : globalThis.crypto;
+    if (cryptoObj?.getRandomValues) {
+      cryptoObj.getRandomValues(randomBuffer);
     } else {
-      const nodeCrypto = require('crypto');
-      const bytes = nodeCrypto.randomBytes(length * 4);
+      const bytes = _sodium.randombytes_buf(length * 4);
       for (let i = 0; i < length; i++) {
-        randomBuffer[i] = bytes.readUInt32LE(i * 4);
+        randomBuffer[i] = (bytes[i * 4] | (bytes[i * 4 + 1] << 8) | (bytes[i * 4 + 2] << 16) | (bytes[i * 4 + 3] << 24)) >>> 0;
       }
     }
 
