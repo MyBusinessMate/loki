@@ -671,6 +671,7 @@ export default function App() {
     try {
       await LokiFirebaseService.savePlatformCredential(activeClient.id, {
         ...newCred,
+        updatedAt: newCred.updatedAt || new Date().toISOString(),
         createdBy: currentUser?.email || 'admin',
       });
     } catch (err) {
@@ -830,6 +831,7 @@ export default function App() {
     try {
       await LokiFirebaseService.savePlatformCredential(activeClient.id, {
         ...updatedItem,
+        updatedAt: updatedItem.updatedAt || new Date().toISOString(),
         createdBy: currentUser.email,
       });
     } catch {

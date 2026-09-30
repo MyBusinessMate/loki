@@ -5,7 +5,7 @@ import { db } from './db/database.js';
 import { LokiAuthService, AuthContext } from './auth/auth.service.js';
 import { LokiAuthorizationService } from './auth/authorization.service.js';
 import { LokiAuditService } from './audit/audit.service.js';
-import { VaultItem, ClientEntity, Vault, VaultKeyWrapper, RiskLevel, ItemType } from './types/models.js';
+import { VaultItem, ClientEntity, Vault, VaultKeyWrapper, RiskLevel, ItemType, User, OrgRole } from './types/models.js';
 
 export const app = express();
 

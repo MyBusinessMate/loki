@@ -17,12 +17,13 @@ export interface ClientPlatformCredential {
   id: string;
   clientId: string;
   platformName: string;
+  keyLabel?: string;
   passwordCiphertext: string;
   passwordNonce: string;
   usernameCiphertext?: string;
   url?: string;
   createdAt: string;
-  updatedAt: string;
+  updatedAt?: string;
   createdBy: string;
 }
 
