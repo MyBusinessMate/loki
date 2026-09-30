@@ -1,0 +1,106 @@
+@import "tailwindcss";
+
+:root {
+  /* Loki Core Color Tokens */
+  --bg-primary: #080A09;
+  --bg-secondary: #0B0F0D;
+  --bg-tertiary: #101412;
+
+  --surface: #101412;
+  --surface-elevated: #171D18;
+  --surface-hover: #1C241E;
+  --surface-active: #202A22;
+  --surface-input: #0C100E;
+
+  --border-subtle: #252B26;
+  --border-default: #34372D;
+  --border-strong: #4A4B3C;
+
+  --primary: #3FAF63;
+  --primary-hover: #52C978;
+  --primary-active: #328D50;
+  --primary-bright: #75F09A;
+  --primary-dark: #1E6B3A;
+
+  --gold: #C9A84E;
+  --gold-hover: #E0C16A;
+  --gold-bright: #F0D98A;
+  --gold-dark: #92782F;
+
+  --amber: #D88932;
+  --amber-hover: #F0A94A;
+  --amber-dark: #92591F;
+
+  --text-primary: #E9E8DF;
+  --text-secondary: #A5AAA1;
+  --text-muted: #6F766E;
+  --text-disabled: #4F554F;
+  --text-inverse: #071009;
+
+  --success: #45C46B;
+  --success-bg: #102719;
+
+  --warning: #D9A441;
+  --warning-bg: #29200D;
+
+  --error: #C94B45;
+  --error-bg: #2A1110;
+
+  --info: #68BFA0;
+  --info-bg: #10231D;
+
+  --font-sans: 'Geist', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'Geist', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  overflow-x: hidden;
+  background-image: 
+    radial-gradient(circle at 15% 15%, rgba(63, 175, 99, 0.035), transparent 40%),
+    radial-gradient(circle at 85% 85%, rgba(201, 168, 78, 0.025), transparent 45%);
+}
+
+code, kbd, pre {
+  font-family: var(--font-mono);
+}
+
+/* Subtle Technical Corner Markers / TVA aesthetics */
+.tva-panel {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  transition: all 150ms ease;
+}
+
+.tva-panel:hover {
+  background: var(--surface-elevated);
+  border-color: var(--border-default);
+}
+
+.tva-glow-green {
+  box-shadow: 0 0 24px rgba(63, 175, 99, 0.12);
+}
+
+.tva-glow-gold {
+  box-shadow: 0 0 20px rgba(201, 168, 78, 0.10);
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-primary);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-default);
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-strong);
+}
