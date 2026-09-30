@@ -2,8 +2,10 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Loki Cloud Vault Security Rules
-    // Protects users, clients, platforms, override requests, and audit logs
+    // Loki Agency Vault Security Rules (Section 34, 47)
+    // Production Cloud Firestore Access for Users, Clients, Platform Credentials,
+    // Deletion Requests, Override Requests, and Audit Trails.
+
     match /users/{userId} {
       allow read, write: if true;
     }
@@ -11,9 +13,14 @@ service cloud.firestore {
     match /clients/{clientId} {
       allow read, write: if true;
 
+      // Client-separated platform credential tables
       match /platforms/{platformId} {
         allow read, write: if true;
       }
+    }
+
+    match /deletion_requests/{reqId} {
+      allow read, write: if true;
     }
 
     match /override_requests/{reqId} {

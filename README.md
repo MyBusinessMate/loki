@@ -1,17 +1,32 @@
-# Loki — Production-Grade Agency Password Manager
+# Loki — Agency Credential & Secret Governance Platform
 
-Loki is a security-critical, zero-knowledge, self-hosted agency password and credential manager. It is designed so that even in the event of a full database leak, unencrypted backup theft, or API server compromise, client secrets remain undecryptable without client-side master passwords and private keys.
+Loki is a security-critical, zero-knowledge, agency credential and password management platform built for modern digital agencies.
+
+It enforces strict tenant and client separation, client-side authenticated encryption (XChaCha20-Poly1305), salted Argon2id password hashing, a canonical three-role governance hierarchy (`timekeeper`, `agent`, `variant`), supervising timekeeper observations ("Under observation of"), emergency code-based credential deletions, and automated audit logging.
 
 ---
 
-## 1. Key Highlights & Security Guarantees
-- **True Zero-Knowledge Client Encryption**: Sensitive fields (passwords, usernames, TOTP secrets, notes) are encrypted client-side using **XChaCha20-Poly1305** with 24-byte random nonces before transmission.
-- **Audited Argon2id Key Derivation**: User KEKs (Key Encryption Keys) are derived using **Argon2id** (64MB memory, 3 passes, 256-bit output).
-- **Asymmetric Key Wrapping**: Shared vaults utilize **Curve25519** box sealing (`crypto_box_seal` / `crypto_box_seal_open`) to wrap Vault DEKs (Data Encryption Keys) for team members.
-- **Tamper-Evident Chained Audit Logs**: Every audit record is HMAC-SHA256 chained to its predecessor to prevent tampering.
-- **Automatic Secret Redaction**: All audit log pipelines automatically scrub passwords, API keys, and tokens.
-- **Incident Lockdown Mode**: Single-click kill switch instantly revokes all employee sessions and freezes export capabilities.
-- **Minimalist Dark Monochrome Interface**: Engineered adhering to a high-contrast editorial aesthetic in pure black and white (`#000000` / `#ededed`), with zero generic fluff.
+## 1. Core Architecture & Highlights
+
+- **Canonical Three-Role Hierarchy**:
+  - `timekeeper`: Full administrative authority over organization settings, user lifecycle, client assignments, platform access, observation supervisors, and emergency approvals.
+  - `agent`: Client account manager restricted to assigned clients and assigned platforms. Credential editing requires verifying the existing password. Credential deletions require timekeeper approval or an active supervising timekeeper's authorization code.
+  - `variant`: Read-only viewer for permitted clients/platforms. Revealing and copying decrypted secrets is permitted, but all mutation operations (create, update, delete) are strictly blocked.
+- **Strict Cryptographic Boundary**:
+  - **User Login Passwords**: Hashed with **Argon2id** (64MB memory, 3 passes, 256-bit output). Passwords are never reversibly encrypted or stored in plaintext.
+  - **Client Platform Secrets**: Authenticated encryption via **XChaCha20-Poly1305** using fresh 24-byte nonces for every encryption operation. Plaintext exists only in client memory during decryption.
+  - **Timekeeper Authorization Codes**: Stored as secure hashes with strict rate-limiting and audit event recording.
+- **"Under Observation Of" Governance**:
+  - Every Agent is supervised by 1 to 3 Timekeepers.
+  - Immediate credential deletion (`delete-with-code`) is valid only when authorized by an active supervising Timekeeper.
+- **Cloud NoSQL Storage & Client Isolation**:
+  - Cloud Firestore integration with client separation where platform secrets reside in dedicated sub-tables (`/clients/{clientId}/platforms/{credentialId}`).
+- **Route Guarding & 404 Isolation**:
+  - Direct routes `/timekeeper`, `/agent`, and `/variant` return strict 404 Not Found responses for unauthorized roles.
+- **Dual Developer Path**:
+  - Works with Firebase MCP / direct cloud tooling, or portable environment variables (`.env` via `.env.example`).
+- **Responsive Aesthetics**:
+  - Built with clean dark green & black palette (`#080A09` / `#101412` / `#3FAF63`), Geist/Inter typography, and zero monospaced fonts. Fully responsive across 320px to 1280px+ viewports.
 
 ---
 
@@ -23,36 +38,40 @@ Loki is a security-critical, zero-knowledge, self-hosted agency password and cre
 
 ### Installation
 ```bash
-git clone https://github.com/agency/loki.git
+git clone https://github.com/MyBusinessMate/loki.git
 cd loki
 npm install
 ```
 
-### Running Tests
-Run the comprehensive cryptographic, authorization, audit, and E2E security test suites:
+### Environment Configuration
+Copy the provided `.env.example` template:
 ```bash
-npm run test
-# or
-npx vitest run
+cp .env.example .env
+```
+Fill in the isolated Firebase project credentials (`loki-agency-vault`).
+
+### Running the Test Suite
+Loki includes unit, integration, cryptographic, and end-to-end security test suites:
+```bash
+npm test
 ```
 
-### Building for Production
+### Production Build
 ```bash
-npx vite build
+npm run build
 ```
 
 ---
 
-## 3. Security Documentation Index
-- [THREAT-MODEL.md](file:///c:/Users/techt/loki/THREAT-MODEL.md) — 36 explicit threat vectors analyzed with preventive, detection, and recovery controls.
+## 3. Documentation Index
+
+- [ROLE-PERMISSIONS.md](file:///c:/Users/techt/loki/ROLE-PERMISSIONS.md) — Canonical three-role model, permission matrix, and scoping rules.
+- [AUTH-FLOW.md](file:///c:/Users/techt/loki/AUTH-FLOW.md) — End-to-end authentication, authorization, Argon2id hashing, and authorization code flows.
+- [FIREBASE.md](file:///c:/Users/techt/loki/FIREBASE.md) — Cloud NoSQL Firestore architecture, client isolation, and dual workflow setup.
 - [CRYPTOGRAPHY.md](file:///c:/Users/techt/loki/CRYPTOGRAPHY.md) — Cryptographic primitives, key hierarchy, and AEAD serialization.
-- [KEY-MANAGEMENT.md](file:///c:/Users/techt/loki/KEY-MANAGEMENT.md) — Key derivation, unwrap/wrap flows, and key rotation.
-- [ARCHITECTURE.md](file:///c:/Users/techt/loki/ARCHITECTURE.md) — High-level system architecture and resource hierarchy.
-- [AUTH-ARCHITECTURE.md](file:///c:/Users/techt/loki/AUTH-ARCHITECTURE.md) — Identity authentication vs zero-knowledge vault unlock.
-- [AUTHORIZATION.md](file:///c:/Users/techt/loki/AUTHORIZATION.md) — Multi-tenant RBAC and database row-level access controls.
-- [DATA-FLOW.md](file:///c:/Users/techt/loki/DATA-FLOW.md) — Mermaid diagrams for credential lifecycles.
-- [SECURITY.md](file:///c:/Users/techt/loki/SECURITY.md) — Vulnerability reporting and security standards.
-- [INCIDENT-RESPONSE.md](file:///c:/Users/techt/loki/INCIDENT-RESPONSE.md) — Lockdown triggers and triage workflows.
-- [BACKUP-DISASTER-RECOVERY.md](file:///c:/Users/techt/loki/BACKUP-DISASTER-RECOVERY.md) — Encrypted backups and restoration procedures.
-- [TESTING.md](file:///c:/Users/techt/loki/TESTING.md) — Complete test coverage matrix.
-- [DEPLOYMENT.md](file:///c:/Users/techt/loki/DEPLOYMENT.md) — Hardened deployment with Docker and Nginx.
+- [SECURITY.md](file:///c:/Users/techt/loki/SECURITY.md) — Security policies, password limits, and vulnerability handling.
+- [TESTING.md](file:///c:/Users/techt/loki/TESTING.md) — Test suite breakdown and verification logs.
+- [THREAT-MODEL.md](file:///c:/Users/techt/loki/THREAT-MODEL.md) — Attack vector analysis and mitigations.
+- [DATA-FLOW.md](file:///c:/Users/techt/loki/DATA-FLOW.md) — Data flow and lifecycle diagrams.
+- [ARCHITECTURE.md](file:///c:/Users/techt/loki/ARCHITECTURE.md) — Architectural overview.
+- [.env.example](file:///c:/Users/techt/loki/.env.example) — Safe environment variable template.

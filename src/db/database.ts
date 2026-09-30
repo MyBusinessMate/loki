@@ -10,11 +10,15 @@ import {
   VaultItem,
   SessionRecord,
   OrgRole,
+  DeletionRequest,
+  PasswordOverrideRequest,
+  ClientPlatformKeyRecord,
 } from '../types/models.js';
 
 /**
  * Loki In-Memory / PostgreSQL Database Storage Service
- * Provides robust multi-tenant data access, atomic consistency, and isolation
+ * Provides robust multi-tenant data access, atomic consistency, supervision relationships,
+ * and deletion request lifecycle management.
  */
 export class LokiDatabase {
   public users: Map<string, User> = new Map();
@@ -22,8 +26,9 @@ export class LokiDatabase {
   public organizations: Map<string, Organization> = new Map();
   public memberships: Map<string, OrganizationMembership> = new Map();
   public clients: Map<string, ClientEntity> = new Map();
-  public clientPlatforms: Map<string, any> = new Map();
-  public overrideRequests: Map<string, any> = new Map();
+  public clientPlatforms: Map<string, ClientPlatformKeyRecord> = new Map();
+  public overrideRequests: Map<string, PasswordOverrideRequest> = new Map();
+  public deletionRequests: Map<string, DeletionRequest> = new Map();
   public vaults: Map<string, Vault> = new Map();
   public vaultKeyWrappers: Map<string, VaultKeyWrapper> = new Map();
   public folders: Map<string, VaultFolder> = new Map();
@@ -35,7 +40,7 @@ export class LokiDatabase {
   }
 
   seedDefaultState() {
-    // Default system seed will be dynamically initialized or loaded per test
+    // Dynamically initialized or loaded per test
   }
 
   clear() {
@@ -46,6 +51,7 @@ export class LokiDatabase {
     this.clients.clear();
     this.clientPlatforms.clear();
     this.overrideRequests.clear();
+    this.deletionRequests.clear();
     this.vaults.clear();
     this.vaultKeyWrappers.clear();
     this.folders.clear();
@@ -62,8 +68,23 @@ export class LokiDatabase {
     return this.users.get(id);
   }
 
+  getUser(id: string): User | undefined {
+    return this.users.get(id);
+  }
+
   saveUser(user: User): void {
     this.users.set(user.id, user);
+  }
+
+  deleteUser(userId: string): void {
+    this.users.delete(userId);
+    // Remove memberships and revoke sessions
+    for (const [mid, m] of this.memberships.entries()) {
+      if (m.userId === userId) {
+        this.memberships.delete(mid);
+      }
+    }
+    this.revokeUserSessions(userId);
   }
 
   // --- Crypto Key Records ---
@@ -118,16 +139,23 @@ export class LokiDatabase {
     this.clients.set(client.id, client);
   }
 
-  // --- Client-Separated Platform Credentials ---
-  listPlatformCredentials(clientId: string): any[] {
-    return Array.from(this.clientPlatforms.values()).filter((cp: any) => cp.clientId === clientId);
+  deleteClient(clientId: string): void {
+    const c = this.clients.get(clientId);
+    if (c) {
+      c.isArchived = true;
+    }
   }
 
-  savePlatformCredential(cred: any): void {
+  // --- Client-Separated Platform Credentials ---
+  listPlatformCredentials(clientId: string): ClientPlatformKeyRecord[] {
+    return Array.from(this.clientPlatforms.values()).filter((cp) => cp.clientId === clientId);
+  }
+
+  savePlatformCredential(cred: ClientPlatformKeyRecord): void {
     this.clientPlatforms.set(`${cred.clientId}:${cred.id}`, cred);
   }
 
-  getPlatformCredential(clientId: string, platformId: string): any | undefined {
+  getPlatformCredential(clientId: string, platformId: string): ClientPlatformKeyRecord | undefined {
     return this.clientPlatforms.get(`${clientId}:${platformId}`);
   }
 
@@ -135,16 +163,33 @@ export class LokiDatabase {
     this.clientPlatforms.delete(`${clientId}:${platformId}`);
   }
 
+  // --- Deletion Requests (Section 9, 10) ---
+  saveDeletionRequest(req: DeletionRequest): void {
+    this.deletionRequests.set(req.id, req);
+  }
+
+  getDeletionRequest(requestId: string): DeletionRequest | undefined {
+    return this.deletionRequests.get(requestId);
+  }
+
+  listDeletionRequests(status?: string): DeletionRequest[] {
+    const list = Array.from(this.deletionRequests.values());
+    if (status) {
+      return list.filter((r) => r.status === status);
+    }
+    return list;
+  }
+
   // --- Password Change Override Requests ---
-  savePasswordOverrideRequest(req: any): void {
+  savePasswordOverrideRequest(req: PasswordOverrideRequest): void {
     this.overrideRequests.set(req.id, req);
   }
 
-  getPasswordOverrideRequest(requestId: string): any | undefined {
+  getPasswordOverrideRequest(requestId: string): PasswordOverrideRequest | undefined {
     return this.overrideRequests.get(requestId);
   }
 
-  listPasswordOverrideRequests(status?: string): any[] {
+  listPasswordOverrideRequests(status?: string): PasswordOverrideRequest[] {
     const list = Array.from(this.overrideRequests.values());
     if (status) {
       return list.filter((r) => r.status === status);

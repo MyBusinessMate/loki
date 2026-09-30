@@ -11,7 +11,7 @@ import {
   Firestore,
 } from 'firebase/firestore';
 import { firebaseConfig } from './firebaseConfig.js';
-import { OrgRole } from '../types/models.js';
+import { OrgRole, DeletionRequest, PasswordOverrideRequest } from '../types/models.js';
 
 export interface ClientPlatformCredential {
   id: string;
@@ -33,6 +33,7 @@ export interface ClientProfile {
   identifier: string;
   description?: string;
   createdAt: string;
+  updatedAt?: string;
 }
 
 export interface LokiFirestoreUser {
@@ -43,7 +44,20 @@ export interface LokiFirestoreUser {
   isActive: boolean;
   kdfSalt?: string;
   publicKey?: string;
+  companyEmail?: string;
+  personalEmail?: string;
+  phoneNumber?: string;
+  roleInCompany?: string;
+  assignedClients?: string[];
+  assignedPlatforms?: Record<string, string[]>;
+  supervisingTimekeepers?: string[];
+  createdByTimekeeperId?: string;
+  passwordHistory?: string[];
+  lastPasswordChangedAt?: string;
+  authCodeHash?: string;
+  authCodeSalt?: string;
   createdAt: string;
+  updatedAt?: string;
 }
 
 /**
@@ -94,7 +108,6 @@ export class LokiFirebaseService {
     cred: ClientPlatformCredential
   ): Promise<void> {
     const firestore = this.getDb();
-    // Dedicated client table subcollection
     const credRef = doc(firestore, 'clients', clientId, 'platforms', cred.id);
     await setDoc(credRef, {
       ...cred,
@@ -160,6 +173,15 @@ export class LokiFirebaseService {
   }
 
   /**
+   * Delete user from Firestore
+   */
+  public static async deleteUser(userId: string): Promise<void> {
+    const firestore = this.getDb();
+    const userRef = doc(firestore, 'users', userId);
+    await deleteDoc(userRef);
+  }
+
+  /**
    * Delete client from Firestore
    */
   public static async deleteClient(clientId: string): Promise<void> {
@@ -171,7 +193,7 @@ export class LokiFirebaseService {
   /**
    * Save password override request in Firestore
    */
-  public static async saveOverrideRequest(req: any): Promise<void> {
+  public static async saveOverrideRequest(req: PasswordOverrideRequest | any): Promise<void> {
     const firestore = this.getDb();
     const reqRef = doc(firestore, 'override_requests', req.id);
     await setDoc(reqRef, {
@@ -188,6 +210,28 @@ export class LokiFirebaseService {
     const reqsRef = collection(firestore, 'override_requests');
     const snapshot = await getDocs(reqsRef);
     return snapshot.docs.map((d) => d.data());
+  }
+
+  /**
+   * Save deletion request in Firestore (Section 9)
+   */
+  public static async saveDeletionRequest(req: DeletionRequest): Promise<void> {
+    const firestore = this.getDb();
+    const reqRef = doc(firestore, 'deletion_requests', req.id);
+    await setDoc(reqRef, {
+      ...req,
+      updatedAt: new Date().toISOString(),
+    }, { merge: true });
+  }
+
+  /**
+   * List deletion requests from Firestore
+   */
+  public static async listDeletionRequests(): Promise<DeletionRequest[]> {
+    const firestore = this.getDb();
+    const reqsRef = collection(firestore, 'deletion_requests');
+    const snapshot = await getDocs(reqsRef);
+    return snapshot.docs.map((d) => d.data() as DeletionRequest);
   }
 
   /**

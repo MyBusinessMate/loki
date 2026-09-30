@@ -3,7 +3,7 @@ import { db } from '../db/database.js';
 import { LokiAuthService } from '../auth/auth.service.js';
 import { LokiAuthorizationService } from '../auth/authorization.service.js';
 
-describe('Loki Security & Authorization Suite (Section 51, 52, 56 Compliance)', () => {
+describe('Loki Security & Authorization Suite (Canonical Roles Compliance)', () => {
   const orgA = 'org-tenant-alpha';
   const orgB = 'org-tenant-beta';
 
@@ -43,7 +43,7 @@ describe('Loki Security & Authorization Suite (Section 51, 52, 56 Compliance)', 
       id: 'mem-a',
       orgId: orgA,
       userId: userA.id,
-      role: 'member',
+      role: 'agent',
       isActive: true,
     });
 
@@ -60,7 +60,7 @@ describe('Loki Security & Authorization Suite (Section 51, 52, 56 Compliance)', 
       userId: userA.id,
       email: userA.email,
       orgId: orgA,
-      role: 'member' as const,
+      role: 'agent' as const,
       sessionId: 'sess-a',
     };
 
@@ -70,11 +70,11 @@ describe('Loki Security & Authorization Suite (Section 51, 52, 56 Compliance)', 
     }).toThrow(/Forbidden: Client not found or access denied/);
   });
 
-  it('TEST-SEC-02: Horizontal privilege escalation blocked (Member accessing unassigned vault)', async () => {
+  it('TEST-SEC-02: Horizontal privilege escalation blocked (Agent accessing unassigned vault)', async () => {
     const userMember = {
       id: 'user-member',
       email: 'bob@alpha.com',
-      fullName: 'Bob Member',
+      fullName: 'Bob Agent',
       passwordHash: 'dummy',
       kdfSalt: 'salt',
       isActive: true,
@@ -86,7 +86,7 @@ describe('Loki Security & Authorization Suite (Section 51, 52, 56 Compliance)', 
       id: 'mem-bob',
       orgId: orgA,
       userId: userMember.id,
-      role: 'member',
+      role: 'agent',
       isActive: true,
     });
 
@@ -104,7 +104,7 @@ describe('Loki Security & Authorization Suite (Section 51, 52, 56 Compliance)', 
       userId: userMember.id,
       email: userMember.email,
       orgId: orgA,
-      role: 'member' as const,
+      role: 'agent' as const,
       sessionId: 'sess-bob',
     };
 
@@ -114,18 +114,18 @@ describe('Loki Security & Authorization Suite (Section 51, 52, 56 Compliance)', 
     }).toThrow(/Forbidden: User is not authorized to access this vault/);
   });
 
-  it('TEST-SEC-03: Vertical privilege escalation blocked (Auditor or Guest attempting edit/delete)', async () => {
-    const contextAuditor = {
-      userId: 'user-audit',
-      email: 'auditor@alpha.com',
+  it('TEST-SEC-03: Vertical privilege escalation blocked (Variant attempting edit/delete)', async () => {
+    const contextVariant = {
+      userId: 'user-variant',
+      email: 'viewer@alpha.com',
       orgId: orgA,
-      role: 'auditor' as const,
-      sessionId: 'sess-audit',
+      role: 'variant' as const,
+      sessionId: 'sess-variant',
     };
 
     expect(() => {
-      LokiAuthorizationService.authorizeAction(contextAuditor.role, 'delete');
-    }).toThrow(/Forbidden: Role 'auditor' lacks permission for 'delete'/);
+      LokiAuthorizationService.authorizeAction(contextVariant.role, 'delete');
+    }).toThrow(/Forbidden: Role 'variant' lacks permission for 'delete'/);
   });
 
   it('TEST-SEC-04: Refresh token rotation revokes lineage upon token reuse', async () => {
@@ -144,12 +144,12 @@ describe('Loki Security & Authorization Suite (Section 51, 52, 56 Compliance)', 
       id: 'mem-rot',
       orgId: orgA,
       userId: user.id,
-      role: 'member',
+      role: 'agent',
       isActive: true,
     });
 
     // 1. Initial Login
-    const tokens1 = await LokiAuthService.createSession(user, orgA, 'member', {});
+    const tokens1 = await LokiAuthService.createSession(user, orgA, 'agent', {});
 
     // 2. Legitimate Refresh
     const tokens2 = await LokiAuthService.rotateRefreshToken(tokens1.refreshToken, {});
@@ -183,11 +183,11 @@ describe('Loki Security & Authorization Suite (Section 51, 52, 56 Compliance)', 
       id: 'mem-lock',
       orgId: orgA,
       userId: user.id,
-      role: 'member',
+      role: 'agent',
       isActive: true,
     });
 
-    const tokens = await LokiAuthService.createSession(user, orgA, 'member', {});
+    const tokens = await LokiAuthService.createSession(user, orgA, 'agent', {});
 
     // Admin triggers lockdown
     const org = db.getOrg(orgA);

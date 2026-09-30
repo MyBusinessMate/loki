@@ -1,4 +1,7 @@
-export type OrgRole = 'owner' | 'admin' | 'manager' | 'member' | 'auditor' | 'guest';
+export type OrgRole = 'timekeeper' | 'agent' | 'variant';
+
+// Backward-compatibility alias during refactoring if needed:
+export type LegacyRole = 'owner' | 'admin' | 'manager' | 'member' | 'auditor' | 'guest';
 
 export interface User {
   id: string;
@@ -10,6 +13,18 @@ export interface User {
   isSuspended: boolean;
   mfaEnabled: boolean;
   mfaSecret?: string;   // TOTP secret for login MFA
+  companyEmail?: string;
+  personalEmail?: string;
+  phoneNumber?: string;
+  roleInCompany?: string; // Business title e.g. "Social Media Director"
+  assignedClients?: string[]; // Array of client IDs
+  assignedPlatforms?: Record<string, string[]>; // Map clientId -> array of allowed platform names
+  supervisingTimekeepers?: string[]; // Max 3 timekeeper user IDs ("Under observation of")
+  createdByTimekeeperId?: string; // Timekeeper who created the account
+  passwordHistory?: string[]; // Historical timestamps of password changes
+  lastPasswordChangedAt?: string; // ISO date of last password change
+  authCodeHash?: string; // Argon2id/SHA256 hash of secret authorization code (timekeepers only)
+  authCodeSalt?: string;
 }
 
 export interface UserCryptoKeyRecord {
@@ -44,6 +59,8 @@ export interface ClientEntity {
   identifier: string;
   description?: string;
   isArchived: boolean;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface Vault {
@@ -129,10 +146,26 @@ export interface AttachmentRecord {
   createdAt: string;
 }
 
+export interface DeletionRequest {
+  id: string;
+  clientId: string;
+  clientName?: string;
+  credentialId: string;
+  platformName: string;
+  requestedByUserId: string;
+  requestedByEmail: string;
+  reason: string;
+  status: 'pending' | 'approved' | 'rejected';
+  createdAt: string;
+  reviewedBy?: string;
+  reviewedAt?: string;
+}
+
 export interface PasswordOverrideRequest {
   id: string;
   clientId: string;
   credentialId: string;
+  platformName?: string;
   requestedByUserId: string;
   requestedByEmail: string;
   reason: string;

@@ -5,7 +5,7 @@ import { db } from '../db/database.js';
 import { User, SessionRecord, OrgRole } from '../types/models.js';
 import { LokiAuditService } from '../audit/audit.service.js';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'loki-production-jwt-signing-secret-2026';
+const JWT_SECRET = process.env.JWT_SECRET || 'loki-production-jwt-signing-secret-2026-strict-key';
 const ACCESS_TOKEN_TTL = '15m';
 const REFRESH_TOKEN_DAYS = 7;
 
@@ -24,13 +24,52 @@ export interface AuthContext {
 
 /**
  * Loki Authentication Service
- * Manages identity, Argon2id verification, session tracking, token rotation, and lockout protection
+ * Manages identity, Argon2id verification, session tracking, token rotation,
+ * strict password complexity policy, 3-per-month password change limits, and 3-day cooldown.
  */
 export class LokiAuthService {
   /**
-   * Hash account login password using Argon2id
+   * Section 20 & 40: Password Validation Policy
+   * - Minimum 8 characters
+   * - Maximum 30 characters
+   * - At least 1 uppercase letter
+   * - At least 1 lowercase letter
+   * - At least 1 number
+   * - At least 1 special character
+   */
+  static validatePasswordComplexity(password: string): { valid: boolean; error?: string } {
+    if (!password || typeof password !== 'string') {
+      return { valid: false, error: 'Password is required' };
+    }
+    if (password.length < 8) {
+      return { valid: false, error: 'Password must be at least 8 characters long' };
+    }
+    if (password.length > 30) {
+      return { valid: false, error: 'Password cannot exceed 30 characters' };
+    }
+    if (!/[A-Z]/.test(password)) {
+      return { valid: false, error: 'Password must include at least one uppercase letter' };
+    }
+    if (!/[a-z]/.test(password)) {
+      return { valid: false, error: 'Password must include at least one lowercase letter' };
+    }
+    if (!/[0-9]/.test(password)) {
+      return { valid: false, error: 'Password must include at least one number' };
+    }
+    if (!/[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?`~]/.test(password)) {
+      return { valid: false, error: 'Password must include at least one special character' };
+    }
+    return { valid: true };
+  }
+
+  /**
+   * Hash account login password using Argon2id (Section 18)
    */
   static async hashLoginPassword(password: string): Promise<string> {
+    const check = this.validatePasswordComplexity(password);
+    if (!check.valid) {
+      throw new Error(check.error);
+    }
     return argon2.hash(password, {
       type: argon2.argon2id,
       memoryCost: 65536,
@@ -48,6 +87,74 @@ export class LokiAuthService {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Section 19: User Password Change Limit & Cooldown
+   * - Maximum 3 changes per calendar month
+   * - 3-day cooldown between self changes
+   * - Exception: Timekeeper who originally created that user may reset within cooldown
+   */
+  static verifyPasswordChangeEligibility(user: User, requestingUserId: string): { allowed: boolean; reason?: string } {
+    const isSelf = user.id === requestingUserId;
+    const isCreatorTimekeeper = user.createdByTimekeeperId === requestingUserId;
+
+    if (!isSelf && !isCreatorTimekeeper) {
+      return { allowed: false, reason: 'Only the account owner or original supervising creator timekeeper may reset this password' };
+    }
+
+    // Creator timekeeper bypasses cooldown and monthly quota
+    if (isCreatorTimekeeper && !isSelf) {
+      return { allowed: true };
+    }
+
+    const now = new Date();
+    const history = user.passwordHistory || [];
+
+    // Filter changes in current calendar month
+    const currentYear = now.getFullYear();
+    const currentMonth = now.getMonth();
+    const changesThisMonth = history.filter((timestampStr) => {
+      const d = new Date(timestampStr);
+      return d.getFullYear() === currentYear && d.getMonth() === currentMonth;
+    });
+
+    if (changesThisMonth.length >= 3) {
+      return {
+        allowed: false,
+        reason: 'Monthly limit reached: Maximum 3 password changes allowed per calendar month.',
+      };
+    }
+
+    if (user.lastPasswordChangedAt) {
+      const lastChange = new Date(user.lastPasswordChangedAt);
+      const cooldownPeriodMs = 3 * 24 * 60 * 60 * 1000; // 3 days in ms
+      const timeSinceLastChange = now.getTime() - lastChange.getTime();
+
+      if (timeSinceLastChange < cooldownPeriodMs) {
+        const remainingHours = Math.ceil((cooldownPeriodMs - timeSinceLastChange) / (1000 * 60 * 60));
+        return {
+          allowed: false,
+          reason: `Password change cooldown active. You can change your password again in ${remainingHours} hours. Contact your supervising Timekeeper for an administrative reset.`,
+        };
+      }
+    }
+
+    return { allowed: true };
+  }
+
+  /**
+   * Section 45: Secure Hash for Timekeeper Authorization Codes
+   */
+  static async hashAuthorizationCode(code: string): Promise<{ hash: string; salt: string }> {
+    const salt = crypto.randomBytes(16).toString('hex');
+    const hash = crypto.createHmac('sha256', salt).update(code.trim()).digest('hex');
+    return { hash, salt };
+  }
+
+  static verifyAuthorizationCode(code: string, storedHash: string, salt: string): boolean {
+    const computed = crypto.createHmac('sha256', salt).update(code.trim()).digest('hex');
+    return crypto.timingSafeEqual(Buffer.from(computed, 'utf-8'), Buffer.from(storedHash, 'utf-8'));
   }
 
   /**
@@ -110,7 +217,7 @@ export class LokiAuthService {
   }
 
   /**
-   * Refresh Token Rotation with reuse detection (Section 23, 24, 54)
+   * Refresh Token Rotation with reuse detection
    */
   static async rotateRefreshToken(
     oldRawRefreshToken: string,
@@ -121,13 +228,11 @@ export class LokiAuthService {
 
     if (!session || session.revoked) {
       if (session) {
-        // Reuse detection: Invalidate all sessions for this compromised user lineage
         db.revokeUserSessions(session.userId);
       }
       throw new Error('Invalid or revoked refresh token');
     }
 
-    // Invalidate old session
     session.revoked = true;
 
     const user = db.findUserById(session.userId);
@@ -135,7 +240,6 @@ export class LokiAuthService {
       throw new Error('User inactive or suspended');
     }
 
-    // Find user membership
     const membership = Array.from(db.memberships.values()).find(
       (m) => m.userId === user.id && m.isActive
     );
@@ -160,9 +264,8 @@ export class LokiAuthService {
         throw new Error('Session revoked or expired');
       }
 
-      // Check organization lockdown
       const org = db.getOrg(decoded.orgId);
-      if (org?.lockdownEnabled && decoded.role !== 'owner') {
+      if (org?.lockdownEnabled && decoded.role !== 'timekeeper') {
         throw new Error('Organization is currently in emergency lockdown mode');
       }
 

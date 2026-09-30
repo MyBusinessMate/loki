@@ -208,12 +208,12 @@ describe('Loki End-to-End API Security Test Suite (Section 49, 52, 57 Compliance
       id: 'mem-b',
       orgId,
       userId: userB.id,
-      role: 'member',
+      role: 'agent',
       isActive: true,
     });
 
     const tokenB = (
-      await LokiAuthService.createSession(userB, orgId, 'member', {})
+      await LokiAuthService.createSession(userB, orgId, 'agent', {})
     ).accessToken;
 
     // 3. Alice creates Client and Vault

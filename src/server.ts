@@ -5,11 +5,23 @@ import { db } from './db/database.js';
 import { LokiAuthService, AuthContext } from './auth/auth.service.js';
 import { LokiAuthorizationService } from './auth/authorization.service.js';
 import { LokiAuditService } from './audit/audit.service.js';
-import { VaultItem, ClientEntity, Vault, VaultKeyWrapper, RiskLevel, ItemType, User, OrgRole } from './types/models.js';
+import {
+  VaultItem,
+  ClientEntity,
+  Vault,
+  VaultKeyWrapper,
+  RiskLevel,
+  ItemType,
+  User,
+  OrgRole,
+  DeletionRequest,
+  PasswordOverrideRequest,
+  ClientPlatformKeyRecord,
+} from './types/models.js';
 
 export const app = express();
 
-// Security Middleware (Section 38, 39)
+// Security Middleware (Section 38, 39, OWASP)
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '10mb' }));
 
@@ -45,11 +57,50 @@ export const requireAuth = (req: AuthenticatedRequest, res: Response, next: Next
   }
 };
 
+// Rate-limiting attempt tracking for Authorization Code entries (Section 10, 45)
+const codeAttemptTracker: Record<string, { attempts: number; blockedUntil: number }> = {};
+
+// Helper: 404 handler for role routes (Section 36, 62)
+const handleUnauthorizedRoute = (res: Response) => {
+  return res.status(404).json({
+    error: 'Not Found',
+    message: 'The requested resource or page was not found on this server.',
+    status: 404,
+  });
+};
+
+// --- ROLE-BASED ACCESS ROUTE GUARDS (Section 35, 36, 62) ---
+// Returns clean 404 not-found behavior when unauthorized role accesses
+app.get(['/timekeeper', '/project/timekeeper', '/project/timekeeper/:subpath'], requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  if (req.auth!.role !== 'timekeeper') {
+    return handleUnauthorizedRoute(res);
+  }
+  res.json({ access: 'granted', role: 'timekeeper', portal: 'timekeeper-console' });
+});
+
+app.get(['/agent', '/project/agent', '/project/agent/:subpath'], requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  if (req.auth!.role !== 'timekeeper' && req.auth!.role !== 'agent') {
+    return handleUnauthorizedRoute(res);
+  }
+  res.json({ access: 'granted', role: req.auth!.role, portal: 'agent-console' });
+});
+
+app.get(['/variant', '/project/variant', '/project/variant/:subpath'], requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  // All three can view client read info, but variant console is specific
+  res.json({ access: 'granted', role: req.auth!.role, portal: 'variant-console' });
+});
+
 // --- AUTH ROUTES ---
 app.post('/api/auth/register', async (req: Request, res: Response) => {
   const { email, password, fullName, kdfSalt, publicKey, encryptedPrivateKey, privateKeyNonce } = req.body;
   if (!email || !password || !fullName || !kdfSalt || !publicKey || !encryptedPrivateKey || !privateKeyNonce) {
     return res.status(400).json({ error: 'Missing required registration parameters' });
+  }
+
+  // Password complexity check (Section 20)
+  const validation = LokiAuthService.validatePasswordComplexity(password);
+  if (!validation.valid) {
+    return res.status(400).json({ error: validation.error });
   }
 
   if (db.findUserByEmail(email)) {
@@ -58,22 +109,42 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
 
   const passwordHash = await LokiAuthService.hashLoginPassword(password);
   const userId = crypto.randomUUID();
-  const orgId = crypto.randomUUID();
 
-  // Create User
-  const newUser = {
+  const isFirstUser = db.users.size === 0;
+  const initialRole: OrgRole = isFirstUser ? 'timekeeper' : 'variant';
+
+  const newUser: User = {
     id: userId,
     email,
+    fullName,
     passwordHash,
     kdfSalt,
-    fullName,
     isActive: true,
     isSuspended: false,
     mfaEnabled: false,
+    passwordHistory: [],
+    lastPasswordChangedAt: undefined,
   };
   db.saveUser(newUser);
 
-  // Store User Asymmetric Crypto Key Record
+  const orgId = 'org-loki-primary';
+  if (!db.getOrg(orgId)) {
+    db.saveOrg({
+      id: orgId,
+      name: 'Loki Primary Organization',
+      slug: 'loki-primary',
+      lockdownEnabled: false,
+    });
+  }
+
+  db.saveMembership({
+    id: crypto.randomUUID(),
+    orgId,
+    userId,
+    role: initialRole,
+    isActive: true,
+  });
+
   db.saveUserCryptoKey({
     userId,
     publicKey,
@@ -82,32 +153,13 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
     cryptoVersion: 'v1-xchacha20poly1305',
   });
 
-  // Create Default Agency Organization
-  const newOrg = {
-    id: orgId,
-    name: `${fullName}'s Agency`,
-    slug: `org-${userId.substring(0, 8)}`,
-    lockdownEnabled: false,
-  };
-  db.saveOrg(newOrg);
-
-  // Assign Owner Membership
-  db.saveMembership({
-    id: crypto.randomUUID(),
-    orgId,
-    userId,
-    role: 'owner',
-    isActive: true,
-  });
-
-  // Issue Session Tokens
-  const tokens = await LokiAuthService.createSession(newUser, orgId, 'owner', {
+  const tokens = await LokiAuthService.createSession(newUser, orgId, initialRole, {
     ipAddress: req.ip,
     userAgent: req.header('user-agent'),
   });
 
   res.status(201).json({
-    user: { id: newUser.id, email: newUser.email, fullName: newUser.fullName },
+    user: { id: newUser.id, email: newUser.email, fullName: newUser.fullName, role: initialRole },
     tokens: { ...tokens, orgId },
   });
 });
@@ -137,12 +189,22 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
   });
 
   res.json({
-    user: { id: user.id, email: user.email, fullName: user.fullName, kdfSalt: user.kdfSalt },
+    user: {
+      id: user.id,
+      email: user.email,
+      fullName: user.fullName,
+      role: membership.role,
+      kdfSalt: user.kdfSalt,
+      roleInCompany: user.roleInCompany,
+      assignedClients: user.assignedClients || [],
+      assignedPlatforms: user.assignedPlatforms || {},
+      supervisingTimekeepers: user.supervisingTimekeepers || [],
+    },
     tokens,
   });
 });
 
-// User self-service change account password
+// User self-service change account password with Section 19 rules (3 per month, 3-day cooldown)
 app.post('/api/auth/change-password', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   const { oldPassword, newPassword } = req.body;
   if (!oldPassword || !newPassword) {
@@ -154,13 +216,29 @@ app.post('/api/auth/change-password', requireAuth, async (req: AuthenticatedRequ
     return res.status(404).json({ error: 'User not found' });
   }
 
+  // 1. Verify old password
   const isOldValid = await LokiAuthService.verifyLoginPassword(user.passwordHash, oldPassword);
   if (!isOldValid) {
     return res.status(401).json({ error: 'Incorrect current password' });
   }
 
+  // 2. Verify monthly limits & cooldown (Section 19)
+  const eligibility = LokiAuthService.verifyPasswordChangeEligibility(user, req.auth!.userId);
+  if (!eligibility.allowed) {
+    return res.status(429).json({ error: eligibility.reason });
+  }
+
+  // 3. Validate new password complexity (Section 20)
+  const validation = LokiAuthService.validatePasswordComplexity(newPassword);
+  if (!validation.valid) {
+    return res.status(400).json({ error: validation.error });
+  }
+
   const newHash = await LokiAuthService.hashLoginPassword(newPassword);
+  const now = new Date().toISOString();
   user.passwordHash = newHash;
+  user.lastPasswordChangedAt = now;
+  user.passwordHistory = [...(user.passwordHistory || []), now];
   db.saveUser(user);
 
   LokiAuditService.recordEvent({
@@ -175,73 +253,6 @@ app.post('/api/auth/change-password', requireAuth, async (req: AuthenticatedRequ
   res.json({ success: true, message: 'Password updated successfully' });
 });
 
-// Admin endpoint: List all users in organization
-app.get('/api/admin/users', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  LokiAuthorizationService.authorizeAction(req.auth!.role, 'manage_permissions');
-
-  const members = db.listOrgMembers(req.auth!.orgId);
-  const userList = members.map((m) => ({
-    id: m.user.id,
-    email: m.user.email,
-    fullName: m.user.fullName,
-    role: m.membership.role,
-    isActive: m.user.isActive,
-  }));
-
-  res.json({ users: userList });
-});
-
-// Admin endpoint: Create/Invite a new user with email, initial password, and role
-app.post('/api/admin/users', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
-  LokiAuthorizationService.authorizeAction(req.auth!.role, 'manage_permissions');
-
-  const { email, password, fullName, role } = req.body;
-  if (!email || !password || !fullName || !role) {
-    return res.status(400).json({ error: 'Email, initial password, full name, and role are required' });
-  }
-
-  if (db.findUserByEmail(email)) {
-    return res.status(409).json({ error: 'User with this email already exists' });
-  }
-
-  const passwordHash = await LokiAuthService.hashLoginPassword(password);
-  const newUserId = crypto.randomUUID();
-  const kdfSalt = crypto.randomBytes(16).toString('hex');
-
-  const newUser: User = {
-    id: newUserId,
-    email,
-    fullName,
-    passwordHash,
-    kdfSalt,
-    isActive: true,
-    isSuspended: false,
-    mfaEnabled: false,
-  };
-  db.saveUser(newUser);
-
-  db.saveMembership({
-    id: crypto.randomUUID(),
-    orgId: req.auth!.orgId,
-    userId: newUserId,
-    role: role as OrgRole,
-    isActive: true,
-  });
-
-  LokiAuditService.recordEvent({
-    orgId: req.auth!.orgId,
-    userId: req.auth!.userId,
-    action: 'USER_INVITE',
-    resourceType: 'user',
-    resourceId: newUserId,
-    metadata: { email, role, fullName },
-  });
-
-  res.status(201).json({
-    user: { id: newUser.id, email: newUser.email, fullName: newUser.fullName, role },
-  });
-});
-
 // Retrieve User's Encrypted Private Key for Vault Unlock
 app.get('/api/crypto/user-keys', requireAuth, (req: AuthenticatedRequest, res: Response) => {
   const keyRecord = db.getUserCryptoKey(req.auth!.userId);
@@ -254,281 +265,6 @@ app.get('/api/crypto/user-keys', requireAuth, (req: AuthenticatedRequest, res: R
     nonce: keyRecord.nonce,
     cryptoVersion: keyRecord.cryptoVersion,
   });
-});
-
-// --- CLIENT ROUTES ---
-app.get('/api/clients', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  const clients = db.listClients(req.auth!.orgId);
-  res.json({ clients });
-});
-
-app.post('/api/clients', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  LokiAuthorizationService.authorizeAction(req.auth!.role, 'create');
-  const { name, identifier, description } = req.body;
-  if (!name || !identifier) {
-    return res.status(400).json({ error: 'Name and identifier are required' });
-  }
-
-  const client: ClientEntity = {
-    id: crypto.randomUUID(),
-    orgId: req.auth!.orgId,
-    name,
-    identifier,
-    description,
-    isArchived: false,
-  };
-  db.saveClient(client);
-
-  res.status(201).json({ client });
-});
-
-// --- FIREBASE NOSQL CLIENT PLATFORM CREDENTIAL ROUTES ---
-// Retrieve platform credentials from client's dedicated table
-app.get('/api/clients/:clientId/platforms', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const clientId = req.params.clientId as string;
-    LokiAuthorizationService.authorizeClient(req.auth!, clientId, 'read');
-
-    const creds = db.listPlatformCredentials(clientId);
-    res.json({ credentials: creds });
-  } catch (err: any) {
-    res.status(403).json({ error: err.message });
-  }
-});
-
-// Add platform credential to client's dedicated table
-app.post('/api/clients/:clientId/platforms', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const clientId = req.params.clientId as string;
-    LokiAuthorizationService.authorizeClient(req.auth!, clientId, 'create');
-
-    const { platformName, passwordCiphertext, passwordNonce, usernameCiphertext, url } = req.body;
-    if (!platformName || !passwordCiphertext || !passwordNonce) {
-      return res.status(400).json({ error: 'platformName, passwordCiphertext, and passwordNonce are required' });
-    }
-
-    const cred = {
-      id: crypto.randomUUID(),
-      clientId,
-      platformName,
-      passwordCiphertext,
-      passwordNonce,
-      usernameCiphertext,
-      url,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      createdBy: req.auth!.userId,
-    };
-
-    db.savePlatformCredential(cred);
-
-    LokiAuditService.recordEvent({
-      orgId: req.auth!.orgId,
-      userId: req.auth!.userId,
-      action: 'ITEM_CREATE',
-      resourceType: 'platform_credential',
-      resourceId: cred.id,
-      metadata: { clientId, platformName },
-    });
-
-    res.status(201).json({ credential: cred });
-  } catch (err: any) {
-    res.status(403).json({ error: err.message });
-  }
-});
-
-// Delete platform credential from client's dedicated table
-app.delete('/api/clients/:clientId/platforms/:platformId', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const clientId = req.params.clientId as string;
-    const platformId = req.params.platformId as string;
-    LokiAuthorizationService.authorizeClient(req.auth!, clientId, 'delete');
-
-    db.deletePlatformCredential(clientId, platformId);
-
-    LokiAuditService.recordEvent({
-      orgId: req.auth!.orgId,
-      userId: req.auth!.userId,
-      action: 'ITEM_DELETE',
-      resourceType: 'platform_credential',
-      resourceId: platformId,
-      metadata: { clientId },
-    });
-
-    res.json({ success: true });
-  } catch (err: any) {
-    res.status(403).json({ error: err.message });
-  }
-});
-
-// Update/Edit platform credential in client's dedicated table
-// Requirement: Must provide old password proof OR have an approved admin override
-app.put('/api/clients/:clientId/platforms/:platformId', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const clientId = req.params.clientId as string;
-    const platformId = req.params.platformId as string;
-    LokiAuthorizationService.authorizeClient(req.auth!, clientId, 'edit');
-
-    const cred = db.getPlatformCredential(clientId, platformId);
-    if (!cred) {
-      return res.status(404).json({ error: 'Platform credential not found' });
-    }
-
-    const {
-      platformName,
-      newPasswordCiphertext,
-      newPasswordNonce,
-      oldPasswordCiphertextProof,
-      overrideRequestId,
-      usernameCiphertext,
-      url,
-    } = req.body;
-
-    if (!newPasswordCiphertext || !newPasswordNonce) {
-      return res.status(400).json({ error: 'newPasswordCiphertext and newPasswordNonce are required' });
-    }
-
-    // Role check: Admin or Owner can edit directly
-    const isAdminOrOwner = ['owner', 'admin'].includes(req.auth!.role);
-
-    if (!isAdminOrOwner) {
-      // Non-admin MUST provide either verified old password proof OR an approved override request
-      let hasApprovedOverride = false;
-      if (overrideRequestId) {
-        const override = db.getPasswordOverrideRequest(overrideRequestId);
-        if (
-          override &&
-          override.credentialId === platformId &&
-          override.requestedByUserId === req.auth!.userId &&
-          override.status === 'approved'
-        ) {
-          hasApprovedOverride = true;
-        }
-      }
-
-      if (!hasApprovedOverride) {
-        if (!oldPasswordCiphertextProof) {
-          return res.status(403).json({
-            error: 'Old password verification required. If you do not know the old password, submit an admin override request.',
-            requiresOverride: true,
-          });
-        }
-        // Verify old ciphertext proof matches stored record
-        if (oldPasswordCiphertextProof !== cred.passwordCiphertext) {
-          return res.status(403).json({
-            error: 'Invalid old password verification proof. Request admin override if unknown.',
-            requiresOverride: true,
-          });
-        }
-      }
-    }
-
-    // Apply updates
-    if (platformName) cred.platformName = platformName;
-    cred.passwordCiphertext = newPasswordCiphertext;
-    cred.passwordNonce = newPasswordNonce;
-    if (usernameCiphertext !== undefined) cred.usernameCiphertext = usernameCiphertext;
-    if (url !== undefined) cred.url = url;
-    cred.updatedAt = new Date().toISOString();
-
-    db.savePlatformCredential(cred);
-
-    LokiAuditService.recordEvent({
-      orgId: req.auth!.orgId,
-      userId: req.auth!.userId,
-      action: 'ITEM_UPDATE',
-      resourceType: 'platform_credential',
-      resourceId: platformId,
-      metadata: { clientId, platformName: cred.platformName },
-    });
-
-    res.json({ success: true, credential: cred });
-  } catch (err: any) {
-    res.status(403).json({ error: err.message });
-  }
-});
-
-// Request Admin Override to change password when old password is unknown
-app.post('/api/clients/:clientId/platforms/:platformId/request-override', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const clientId = req.params.clientId as string;
-    const platformId = req.params.platformId as string;
-    LokiAuthorizationService.authorizeClient(req.auth!, clientId, 'read');
-
-    const cred = db.getPlatformCredential(clientId, platformId);
-    if (!cred) {
-      return res.status(404).json({ error: 'Platform credential not found' });
-    }
-
-    const { reason } = req.body;
-    const overrideReq = {
-      id: crypto.randomUUID(),
-      clientId,
-      credentialId: platformId,
-      requestedByUserId: req.auth!.userId,
-      requestedByEmail: req.auth!.email,
-      reason: reason || 'Lost or forgot previous password',
-      status: 'pending',
-      createdAt: new Date().toISOString(),
-    };
-
-    db.savePasswordOverrideRequest(overrideReq);
-
-    LokiAuditService.recordEvent({
-      orgId: req.auth!.orgId,
-      userId: req.auth!.userId,
-      action: 'OVERRIDE_REQUEST_SUBMITTED',
-      resourceType: 'override_request',
-      resourceId: overrideReq.id,
-      metadata: { clientId, credentialId: platformId, reason: overrideReq.reason },
-    });
-
-    res.status(201).json({ request: overrideReq });
-  } catch (err: any) {
-    res.status(403).json({ error: err.message });
-  }
-});
-
-// Admin endpoint: List pending or all password override requests
-app.get('/api/admin/override-requests', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  LokiAuthorizationService.authorizeAction(req.auth!.role, 'manage_permissions');
-
-  const requests = db.listPasswordOverrideRequests();
-  res.json({ requests });
-});
-
-// Admin endpoint: Review (approve or reject) a password override request
-app.post('/api/admin/override-requests/:requestId/review', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  LokiAuthorizationService.authorizeAction(req.auth!.role, 'manage_permissions');
-
-  const requestId = req.params.requestId as string;
-  const { decision } = req.body; // 'approved' | 'rejected'
-
-  if (!['approved', 'rejected'].includes(decision)) {
-    return res.status(400).json({ error: "Decision must be 'approved' or 'rejected'" });
-  }
-
-  const override = db.getPasswordOverrideRequest(requestId);
-  if (!override) {
-    return res.status(404).json({ error: 'Override request not found' });
-  }
-
-  override.status = decision;
-  override.reviewedBy = req.auth!.userId;
-  override.reviewedAt = new Date().toISOString();
-
-  db.savePasswordOverrideRequest(override);
-
-  LokiAuditService.recordEvent({
-    orgId: req.auth!.orgId,
-    userId: req.auth!.userId,
-    action: `OVERRIDE_REQUEST_${decision.toUpperCase()}`,
-    resourceType: 'override_request',
-    resourceId: requestId,
-    metadata: { decision, requestedBy: override.requestedByEmail },
-  });
-
-  res.json({ success: true, request: override });
 });
 
 // --- VAULT ROUTES ---
@@ -585,94 +321,11 @@ app.get('/api/vaults/:vaultId/key', requireAuth, (req: AuthenticatedRequest, res
 
     res.json({ wrapper });
   } catch (err: any) {
-    return res.status(403).json({ error: err.message });
+    res.status(403).json({ error: err.message });
   }
 });
 
-// --- VAULT ITEM (CREDENTIALS) ROUTES ---
-// Server NEVER receives plaintext secrets
-app.get('/api/vaults/:vaultId/items', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  const vaultId = req.params.vaultId as string;
-  LokiAuthorizationService.authorizeVault(req.auth!, vaultId, 'read');
-
-  const items = db.listVaultItems(vaultId);
-  res.json({ items });
-});
-
-app.post('/api/vaults/:vaultId/items', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  const vaultId = req.params.vaultId as string;
-  LokiAuthorizationService.authorizeVault(req.auth!, vaultId, 'create');
-
-  const { title, itemType, riskLevel, url, tags, ciphertext, nonce, keyVersion } = req.body;
-  if (!title || !ciphertext || !nonce) {
-    return res.status(400).json({ error: 'title, ciphertext, and nonce are required' });
-  }
-
-  const item: VaultItem = {
-    id: crypto.randomUUID(),
-    vaultId,
-    title,
-    itemType: (itemType as ItemType) || 'login',
-    riskLevel: (riskLevel as RiskLevel) || 'normal',
-    url,
-    tags: tags || [],
-    ciphertext,
-    nonce,
-    cryptoVersion: 'v1-xchacha20poly1305',
-    keyVersion: keyVersion || 1,
-    createdBy: req.auth!.userId,
-    isDeleted: false,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  };
-
-  db.saveVaultItem(item);
-
-  LokiAuditService.recordEvent({
-    orgId: req.auth!.orgId,
-    userId: req.auth!.userId,
-    action: 'ITEM_CREATE',
-    resourceType: 'item',
-    resourceId: item.id,
-    metadata: { title: item.title, riskLevel: item.riskLevel },
-  });
-
-  res.status(201).json({ item });
-});
-
-app.delete('/api/vaults/:vaultId/items/:itemId', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  const vaultId = req.params.vaultId as string;
-  const itemId = req.params.itemId as string;
-  LokiAuthorizationService.authorizeVault(req.auth!, vaultId, 'delete');
-
-  const item = db.getVaultItem(itemId);
-  if (item) {
-    item.isDeleted = true;
-    LokiAuditService.recordEvent({
-      orgId: req.auth!.orgId,
-      userId: req.auth!.userId,
-      action: 'ITEM_DELETE',
-      resourceType: 'item',
-      resourceId: itemId,
-      metadata: { title: item.title },
-    });
-  }
-
-  res.json({ success: true });
-});
-
-// --- SHARING & KEY ROTATION ROUTES ---
-// Get public key of a member to wrap a vault key
-app.get('/api/users/:targetUserId/public-key', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  const targetUserId = req.params.targetUserId as string;
-  const keyRecord = db.getUserCryptoKey(targetUserId);
-  if (!keyRecord) {
-    return res.status(404).json({ error: 'User public key not found' });
-  }
-  res.json({ publicKey: keyRecord.publicKey });
-});
-
-// Add member to vault with wrapped DEK
+// Share Vault Key with another User
 app.post('/api/vaults/:vaultId/share', requireAuth, (req: AuthenticatedRequest, res: Response) => {
   const vaultId = req.params.vaultId as string;
   LokiAuthorizationService.authorizeVault(req.auth!, vaultId, 'share');
@@ -703,68 +356,881 @@ app.post('/api/vaults/:vaultId/share', requireAuth, (req: AuthenticatedRequest, 
   res.status(201).json({ success: true, wrapper });
 });
 
-// Rotate Vault Key
-app.post('/api/vaults/:vaultId/rotate-key', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+// --- VAULT ITEM (CREDENTIALS) ROUTES ---
+app.get('/api/vaults/:vaultId/items', requireAuth, (req: AuthenticatedRequest, res: Response) => {
   const vaultId = req.params.vaultId as string;
-  LokiAuthorizationService.authorizeVault(req.auth!, vaultId, 'rotate_key');
+  LokiAuthorizationService.authorizeVault(req.auth!, vaultId, 'read');
 
-  const { newKeyVersion, reEncryptedItems, newWrappedKeys } = req.body;
-  if (!newKeyVersion || !reEncryptedItems || !newWrappedKeys) {
-    return res.status(400).json({ error: 'newKeyVersion, reEncryptedItems, and newWrappedKeys are required' });
+  const items = db.listVaultItems(vaultId);
+  res.json({ items });
+});
+
+app.post('/api/vaults/:vaultId/items', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  const vaultId = req.params.vaultId as string;
+  LokiAuthorizationService.authorizeVault(req.auth!, vaultId, 'create');
+
+  const { itemType, riskLevel, title, url, tags, ciphertext, nonce, keyVersion } = req.body;
+  if (!itemType || !title || !ciphertext || !nonce) {
+    return res.status(400).json({ error: 'itemType, title, ciphertext, and nonce are required' });
   }
 
-  const vault = db.getVault(vaultId);
-  if (!vault) return res.status(404).json({ error: 'Vault not found' });
-
-  // Atomic update
-  vault.keyVersion = newKeyVersion;
-
-  // Update re-encrypted items
-  for (const it of reEncryptedItems) {
-    const existing = db.getVaultItem(it.id);
-    if (existing) {
-      existing.ciphertext = it.ciphertext;
-      existing.nonce = it.nonce;
-      existing.keyVersion = newKeyVersion;
-      existing.updatedAt = new Date().toISOString();
-    }
-  }
-
-  // Update wrapped keys
-  for (const wk of newWrappedKeys) {
-    const wrapper: VaultKeyWrapper = {
-      id: crypto.randomUUID(),
-      vaultId,
-      userId: wk.userId,
-      keyVersion: newKeyVersion,
-      wrappedKey: wk.wrappedKey,
-    };
-    db.saveVaultKeyWrapper(wrapper);
-  }
+  const item: VaultItem = {
+    id: crypto.randomUUID(),
+    vaultId,
+    itemType: itemType as ItemType,
+    riskLevel: (riskLevel as RiskLevel) || 'normal',
+    title,
+    url,
+    tags: tags || [],
+    ciphertext,
+    nonce,
+    cryptoVersion: 'v1-xchacha20poly1305',
+    keyVersion: keyVersion || 1,
+    createdBy: req.auth!.userId,
+    isDeleted: false,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  db.saveVaultItem(item);
 
   LokiAuditService.recordEvent({
     orgId: req.auth!.orgId,
     userId: req.auth!.userId,
-    action: 'KEY_ROTATION',
-    resourceType: 'vault',
-    resourceId: vaultId,
-    metadata: { newKeyVersion, itemsUpdatedCount: reEncryptedItems.length },
+    action: 'ITEM_CREATE',
+    resourceType: 'item',
+    resourceId: item.id,
+    metadata: { vaultId, itemType, riskLevel: item.riskLevel },
   });
 
-  res.json({ success: true, newKeyVersion });
+  res.status(201).json({ item });
+});
+app.get('/api/admin/users', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  if (req.auth!.role !== 'timekeeper') {
+    return res.status(403).json({ error: 'Forbidden: Timekeeper access required' });
+  }
+
+  const members = db.listOrgMembers(req.auth!.orgId);
+  const userList = members.map((m) => ({
+    id: m.user.id,
+    email: m.user.email,
+    fullName: m.user.fullName,
+    companyEmail: m.user.companyEmail || m.user.email,
+    personalEmail: m.user.personalEmail || '',
+    phoneNumber: m.user.phoneNumber || '',
+    roleInCompany: m.user.roleInCompany || '',
+    role: m.membership.role,
+    isActive: m.user.isActive,
+    assignedClients: m.user.assignedClients || [],
+    assignedPlatforms: m.user.assignedPlatforms || {},
+    supervisingTimekeepers: m.user.supervisingTimekeepers || [],
+    lastPasswordChangedAt: m.user.lastPasswordChangedAt,
+  }));
+
+  res.json({ users: userList });
+});
+
+// Timekeeper creates/invites user (Section 3, 11, 16)
+app.post('/api/admin/users', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  if (req.auth!.role !== 'timekeeper' && req.auth!.role !== ('admin' as any) && req.auth!.role !== ('owner' as any)) {
+    return res.status(403).json({ error: 'Forbidden: Timekeeper access required' });
+  }
+
+  const {
+    email,
+    password,
+    fullName,
+    role,
+    companyEmail,
+    personalEmail,
+    phoneNumber,
+    roleInCompany,
+    assignedClients,
+    assignedPlatforms,
+    supervisingTimekeepers,
+    authCode,
+  } = req.body;
+
+  if (!email || !password || !fullName || !role) {
+    return res.status(400).json({ error: 'Email, initial password, full name, and role are required' });
+  }
+
+  // Canonical normalization: timekeeper | agent | variant, with legacy compatibility
+  let canonicalRole: OrgRole = 'variant';
+  if (role === 'timekeeper' || role === 'owner' || role === 'admin') canonicalRole = 'timekeeper';
+  else if (role === 'agent' || role === 'manager' || role === 'member') canonicalRole = 'agent';
+  else if (role === 'variant' || role === 'auditor' || role === 'guest') canonicalRole = 'variant';
+  else {
+    return res.status(400).json({ error: "Role must be 'timekeeper', 'agent', or 'variant'" });
+  }
+
+  // Password complexity check
+  const validation = LokiAuthService.validatePasswordComplexity(password);
+  if (!validation.valid) {
+    return res.status(400).json({ error: validation.error });
+  }
+
+  if (db.findUserByEmail(email)) {
+    return res.status(409).json({ error: 'User with this email already exists' });
+  }
+
+  // Section 11: Agent supervising timekeepers validation (min 1, max 3)
+  let supervisors: string[] = Array.isArray(supervisingTimekeepers) ? supervisingTimekeepers : [];
+  if (role === 'agent') {
+    if (supervisors.length === 0) {
+      supervisors = [req.auth!.userId]; // Default supervising timekeeper
+    }
+    if (supervisors.length > 3) {
+      return res.status(400).json({ error: 'Agents can have a maximum of 3 supervising timekeepers' });
+    }
+  }
+
+  const passwordHash = await LokiAuthService.hashLoginPassword(password);
+  const newUserId = crypto.randomUUID();
+  const kdfSalt = crypto.randomBytes(16).toString('hex');
+
+  // If timekeeper role and authCode provided, securely hash it (Section 45)
+  let authCodeHash: string | undefined;
+  let authCodeSalt: string | undefined;
+  if (role === 'timekeeper' && authCode) {
+    const codeRecord = await LokiAuthService.hashAuthorizationCode(authCode);
+    authCodeHash = codeRecord.hash;
+    authCodeSalt = codeRecord.salt;
+  }
+
+  const newUser: User = {
+    id: newUserId,
+    email,
+    fullName,
+    companyEmail: companyEmail || email,
+    personalEmail: personalEmail || '',
+    phoneNumber: phoneNumber || '',
+    roleInCompany: roleInCompany || '',
+    passwordHash,
+    kdfSalt,
+    isActive: true,
+    isSuspended: false,
+    mfaEnabled: false,
+    assignedClients: Array.isArray(assignedClients) ? assignedClients : [],
+    assignedPlatforms: typeof assignedPlatforms === 'object' && assignedPlatforms ? assignedPlatforms : {},
+    supervisingTimekeepers: supervisors,
+    createdByTimekeeperId: req.auth!.userId,
+    passwordHistory: [],
+    lastPasswordChangedAt: undefined,
+    authCodeHash,
+    authCodeSalt,
+  };
+  db.saveUser(newUser);
+
+  db.saveMembership({
+    id: crypto.randomUUID(),
+    orgId: req.auth!.orgId,
+    userId: newUserId,
+    role: canonicalRole,
+    isActive: true,
+  });
+
+  LokiAuditService.recordEvent({
+    orgId: req.auth!.orgId,
+    userId: req.auth!.userId,
+    action: 'USER_INVITE',
+    resourceType: 'user',
+    resourceId: newUserId,
+    metadata: { email, role, fullName },
+  });
+
+  res.status(201).json({
+    user: {
+      id: newUser.id,
+      email: newUser.email,
+      fullName: newUser.fullName,
+      role,
+      assignedClients: newUser.assignedClients,
+      assignedPlatforms: newUser.assignedPlatforms,
+      supervisingTimekeepers: newUser.supervisingTimekeepers,
+    },
+  });
+});
+
+// Timekeeper updates user or changes role (Section 14: atomic role downgrade & session revocation)
+app.put('/api/admin/users/:userId', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  if (req.auth!.role !== 'timekeeper') {
+    return res.status(403).json({ error: 'Forbidden: Timekeeper access required' });
+  }
+
+  const targetUserId = req.params.userId as string;
+  const targetUser = db.getUser(targetUserId);
+  if (!targetUser) return res.status(404).json({ error: 'User not found' });
+
+  const membership = db.getMembership(req.auth!.orgId, targetUserId);
+  if (!membership) return res.status(404).json({ error: 'Membership not found' });
+
+  const {
+    fullName,
+    companyEmail,
+    personalEmail,
+    phoneNumber,
+    roleInCompany,
+    role,
+    assignedClients,
+    assignedPlatforms,
+    supervisingTimekeepers,
+    isActive,
+    authCode,
+  } = req.body;
+
+  if (fullName) targetUser.fullName = fullName;
+  if (companyEmail) targetUser.companyEmail = companyEmail;
+  if (personalEmail !== undefined) targetUser.personalEmail = personalEmail;
+  if (phoneNumber !== undefined) targetUser.phoneNumber = phoneNumber;
+  if (roleInCompany !== undefined) targetUser.roleInCompany = roleInCompany;
+  if (isActive !== undefined) {
+    targetUser.isActive = Boolean(isActive);
+    if (!targetUser.isActive) {
+      // User disabled/leaving: revoke sessions & invalidate authorization codes (Section 13)
+      db.revokeUserSessions(targetUserId);
+      targetUser.authCodeHash = undefined;
+      targetUser.authCodeSalt = undefined;
+    }
+  }
+  if (Array.isArray(assignedClients)) targetUser.assignedClients = assignedClients;
+  if (typeof assignedPlatforms === 'object' && assignedPlatforms) targetUser.assignedPlatforms = assignedPlatforms;
+
+  if (Array.isArray(supervisingTimekeepers)) {
+    if (supervisingTimekeepers.length > 3) {
+      return res.status(400).json({ error: 'Maximum 3 supervising timekeepers permitted' });
+    }
+    targetUser.supervisingTimekeepers = supervisingTimekeepers;
+  }
+
+  // Set/update timekeeper authorization code
+  if (authCode) {
+    const codeRecord = await LokiAuthService.hashAuthorizationCode(authCode);
+    targetUser.authCodeHash = codeRecord.hash;
+    targetUser.authCodeSalt = codeRecord.salt;
+  }
+
+  // Section 14: Atomic Role Change Handling & Immediate Session Invalidation
+  if (role && role !== membership.role) {
+    if (!['timekeeper', 'agent', 'variant'].includes(role)) {
+      return res.status(400).json({ error: 'Invalid role' });
+    }
+
+    const oldRole = membership.role;
+    membership.role = role as OrgRole;
+
+    // Immediately revoke sessions so downgraded user cannot use stale tokens (Section 14, 37, 52)
+    db.revokeUserSessions(targetUserId);
+
+    LokiAuditService.recordEvent({
+      orgId: req.auth!.orgId,
+      userId: req.auth!.userId,
+      action: 'ROLE_CHANGE',
+      resourceType: 'user',
+      resourceId: targetUserId,
+      metadata: { previousRole: oldRole, newRole: role },
+    });
+  }
+
+  db.saveUser(targetUser);
+  db.saveMembership(membership);
+
+  res.json({ success: true, user: targetUser, role: membership.role });
+});
+
+// Administrative password reset by creator Timekeeper (Section 19 exception)
+app.post('/api/admin/users/:userId/reset-password', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  if (req.auth!.role !== 'timekeeper') {
+    return res.status(403).json({ error: 'Forbidden: Timekeeper access required' });
+  }
+
+  const targetUserId = req.params.userId as string;
+  const targetUser = db.getUser(targetUserId);
+  if (!targetUser) return res.status(404).json({ error: 'User not found' });
+
+  const { newPassword } = req.body;
+  if (!newPassword) return res.status(400).json({ error: 'New password is required' });
+
+  const validation = LokiAuthService.validatePasswordComplexity(newPassword);
+  if (!validation.valid) {
+    return res.status(400).json({ error: validation.error });
+  }
+
+  const newHash = await LokiAuthService.hashLoginPassword(newPassword);
+  targetUser.passwordHash = newHash;
+  targetUser.lastPasswordChangedAt = new Date().toISOString();
+  db.saveUser(targetUser);
+
+  // Invalidate user sessions to enforce login with new credential
+  db.revokeUserSessions(targetUserId);
+
+  LokiAuditService.recordEvent({
+    orgId: req.auth!.orgId,
+    userId: req.auth!.userId,
+    action: 'ADMIN_PASSWORD_RESET',
+    resourceType: 'user',
+    resourceId: targetUserId,
+    metadata: { targetUserEmail: targetUser.email },
+  });
+
+  res.json({ success: true, message: 'Password reset successfully' });
+});
+
+// Timekeeper deletes user (Section 3)
+app.delete('/api/admin/users/:userId', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  if (req.auth!.role !== 'timekeeper') {
+    return res.status(403).json({ error: 'Forbidden: Timekeeper access required' });
+  }
+
+  const targetUserId = req.params.userId as string;
+  if (targetUserId === req.auth!.userId) {
+    return res.status(400).json({ error: 'Timekeeper cannot delete their own active account' });
+  }
+
+  db.deleteUser(targetUserId);
+
+  LokiAuditService.recordEvent({
+    orgId: req.auth!.orgId,
+    userId: req.auth!.userId,
+    action: 'USER_DELETE',
+    resourceType: 'user',
+    resourceId: targetUserId,
+  });
+
+  res.json({ success: true });
+});
+
+// --- CLIENT ROUTES ---
+app.get('/api/clients', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  let clients = db.listClients(req.auth!.orgId);
+
+  // Section 4: If Agent or Variant, filter ONLY to assigned clients
+  if (req.auth!.role !== 'timekeeper') {
+    const user = db.getUser(req.auth!.userId);
+    const assigned = user?.assignedClients || [];
+    clients = clients.filter((c) => assigned.includes(c.id));
+  }
+
+  res.json({ clients });
+});
+
+app.post('/api/clients', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  // Only Timekeeper can create clients (Section 3, 6)
+  if (req.auth!.role !== 'timekeeper' && req.auth!.role !== ('admin' as any) && req.auth!.role !== ('owner' as any)) {
+    return res.status(403).json({ error: 'Forbidden: Only Timekeepers can create clients' });
+  }
+
+  const { name, identifier, description } = req.body;
+  if (!name || !identifier) {
+    return res.status(400).json({ error: 'Name and identifier are required' });
+  }
+
+  const client: ClientEntity = {
+    id: crypto.randomUUID(),
+    orgId: req.auth!.orgId,
+    name,
+    identifier,
+    description,
+    isArchived: false,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  db.saveClient(client);
+
+  LokiAuditService.recordEvent({
+    orgId: req.auth!.orgId,
+    userId: req.auth!.userId,
+    action: 'CLIENT_CREATE',
+    resourceType: 'client',
+    resourceId: client.id,
+    metadata: { name, identifier },
+  });
+
+  res.status(201).json({ client });
+});
+
+app.delete('/api/clients/:clientId', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  if (req.auth!.role !== 'timekeeper' && req.auth!.role !== ('admin' as any) && req.auth!.role !== ('owner' as any)) {
+    return res.status(403).json({ error: 'Forbidden: Only Timekeepers can delete clients' });
+  }
+
+  const clientId = req.params.clientId as string;
+  db.deleteClient(clientId);
+
+  LokiAuditService.recordEvent({
+    orgId: req.auth!.orgId,
+    userId: req.auth!.userId,
+    action: 'CLIENT_DELETE',
+    resourceType: 'client',
+    resourceId: clientId,
+  });
+
+  res.json({ success: true });
+});
+
+// --- PLATFORM CREDENTIAL ROUTES (Section 6, 7, 8, 9, 10, 22, 23, 24, 25) ---
+app.get('/api/clients/:clientId/platforms', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const clientId = req.params.clientId as string;
+    LokiAuthorizationService.authorizeClient(req.auth!, clientId, 'read');
+
+    let creds = db.listPlatformCredentials(clientId);
+
+    // Section 5 & 15: If Agent or Variant, filter by platform-level assignment if defined
+    if (req.auth!.role !== 'timekeeper') {
+      const user = db.getUser(req.auth!.userId);
+      if (user?.assignedPlatforms && user.assignedPlatforms[clientId]) {
+        const allowed = user.assignedPlatforms[clientId];
+        if (allowed.length > 0) {
+          creds = creds.filter((c) => allowed.includes(c.platformName));
+        }
+      }
+    }
+
+    res.json({ credentials: creds });
+  } catch (err: any) {
+    res.status(403).json({ error: err.message });
+  }
+});
+
+// Add platform credential (Section 6, 8, 23): Timekeeper or Agent for assigned client
+app.post('/api/clients/:clientId/platforms', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const clientId = req.params.clientId as string;
+    // Variants CANNOT add credentials (Section 6, 15)
+    if (req.auth!.role === 'variant') {
+      return res.status(403).json({ error: 'Forbidden: Variants cannot create platform credentials' });
+    }
+
+    const { platformName, passwordCiphertext, passwordNonce, usernameCiphertext, url, keyLabel } = req.body;
+    if (!platformName || !passwordCiphertext || !passwordNonce) {
+      return res.status(400).json({ error: 'platformName, passwordCiphertext, and passwordNonce are required' });
+    }
+
+    LokiAuthorizationService.authorizePlatformCredential(req.auth!, clientId, platformName, 'create');
+
+    const cred: ClientPlatformKeyRecord = {
+      id: crypto.randomUUID(),
+      clientId,
+      platformName,
+      keyLabel,
+      passwordCiphertext,
+      passwordNonce,
+      usernameCiphertext,
+      url,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      createdBy: req.auth!.userId,
+    };
+
+    db.savePlatformCredential(cred);
+
+    LokiAuditService.recordEvent({
+      orgId: req.auth!.orgId,
+      userId: req.auth!.userId,
+      action: 'ITEM_CREATE',
+      resourceType: 'platform_credential',
+      resourceId: cred.id,
+      metadata: { clientId, platformName },
+    });
+
+    res.status(201).json({ credential: cred });
+  } catch (err: any) {
+    res.status(403).json({ error: err.message });
+  }
+});
+
+// Update/Edit platform credential (Section 6, 7): Must verify current password proof or have approved override
+app.put('/api/clients/:clientId/platforms/:platformId', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const clientId = req.params.clientId as string;
+    const platformId = req.params.platformId as string;
+
+    if (req.auth!.role === 'variant') {
+      return res.status(403).json({ error: 'Forbidden: Variants cannot edit platform credentials' });
+    }
+
+    const cred = db.getPlatformCredential(clientId, platformId);
+    if (!cred) {
+      return res.status(404).json({ error: 'Platform credential not found' });
+    }
+
+    LokiAuthorizationService.authorizePlatformCredential(req.auth!, clientId, cred.platformName, 'edit');
+
+    const {
+      platformName,
+      newPasswordCiphertext,
+      newPasswordNonce,
+      oldPasswordCiphertextProof,
+      overrideRequestId,
+      usernameCiphertext,
+      url,
+      keyLabel,
+    } = req.body;
+
+    if (!newPasswordCiphertext || !newPasswordNonce) {
+      return res.status(400).json({ error: 'newPasswordCiphertext and newPasswordNonce are required' });
+    }
+
+    // Timekeeper can edit directly. Agent MUST provide old password proof OR approved override (Section 7)
+    if (req.auth!.role !== 'timekeeper') {
+      let hasApprovedOverride = false;
+      if (overrideRequestId) {
+        const override = db.getPasswordOverrideRequest(overrideRequestId);
+        if (
+          override &&
+          override.credentialId === platformId &&
+          override.requestedByUserId === req.auth!.userId &&
+          override.status === 'approved'
+        ) {
+          hasApprovedOverride = true;
+        }
+      }
+
+      if (!hasApprovedOverride) {
+        if (!oldPasswordCiphertextProof) {
+          return res.status(403).json({
+            error: 'Old password verification required. If you do not know the old password, submit a timekeeper override request.',
+            requiresOverride: true,
+          });
+        }
+        if (oldPasswordCiphertextProof !== cred.passwordCiphertext) {
+          return res.status(403).json({
+            error: 'Invalid old password verification proof. Request timekeeper override if unknown.',
+            requiresOverride: true,
+          });
+        }
+      }
+    }
+
+    if (platformName) cred.platformName = platformName;
+    if (keyLabel !== undefined) cred.keyLabel = keyLabel;
+    cred.passwordCiphertext = newPasswordCiphertext;
+    cred.passwordNonce = newPasswordNonce;
+    if (usernameCiphertext !== undefined) cred.usernameCiphertext = usernameCiphertext;
+    if (url !== undefined) cred.url = url;
+    cred.updatedAt = new Date().toISOString();
+
+    db.savePlatformCredential(cred);
+
+    LokiAuditService.recordEvent({
+      orgId: req.auth!.orgId,
+      userId: req.auth!.userId,
+      action: 'ITEM_UPDATE',
+      resourceType: 'platform_credential',
+      resourceId: platformId,
+      metadata: { clientId, platformName: cred.platformName },
+    });
+
+    res.json({ success: true, credential: cred });
+  } catch (err: any) {
+    res.status(403).json({ error: err.message });
+  }
+});
+
+// Delete platform credential directly (Section 3: Timekeeper ONLY)
+app.delete('/api/clients/:clientId/platforms/:platformId', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const clientId = req.params.clientId as string;
+    const platformId = req.params.platformId as string;
+
+    if (req.auth!.role !== 'timekeeper') {
+      return res.status(403).json({
+        error: 'Forbidden: Agents cannot delete credentials directly. Use "Send for deletion" or "Delete with code".',
+      });
+    }
+
+    db.deletePlatformCredential(clientId, platformId);
+
+    LokiAuditService.recordEvent({
+      orgId: req.auth!.orgId,
+      userId: req.auth!.userId,
+      action: 'ITEM_DELETE',
+      resourceType: 'platform_credential',
+      resourceId: platformId,
+      metadata: { clientId },
+    });
+
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(403).json({ error: err.message });
+  }
+});
+
+// --- DELETION REQUEST WORKFLOW (Section 9) ---
+// Agent submits a deletion request to assigned supervising Timekeepers
+app.post('/api/clients/:clientId/platforms/:platformId/deletion-request', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const clientId = req.params.clientId as string;
+    const platformId = req.params.platformId as string;
+
+    LokiAuthorizationService.authorizeClient(req.auth!, clientId, 'read');
+
+    const cred = db.getPlatformCredential(clientId, platformId);
+    if (!cred) return res.status(404).json({ error: 'Credential not found' });
+
+    const { reason } = req.body;
+    const requestId = crypto.randomUUID();
+
+    const deletionReq: DeletionRequest = {
+      id: requestId,
+      clientId,
+      credentialId: platformId,
+      platformName: cred.platformName,
+      requestedByUserId: req.auth!.userId,
+      requestedByEmail: req.auth!.email,
+      reason: reason || 'Agent requested credential deletion',
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+    };
+
+    db.saveDeletionRequest(deletionReq);
+
+    LokiAuditService.recordEvent({
+      orgId: req.auth!.orgId,
+      userId: req.auth!.userId,
+      action: 'DELETION_REQUEST_CREATED',
+      resourceType: 'deletion_request',
+      resourceId: requestId,
+      metadata: { clientId, platformId, platformName: cred.platformName },
+    });
+
+    res.status(201).json({ success: true, request: deletionReq });
+  } catch (err: any) {
+    res.status(403).json({ error: err.message });
+  }
+});
+
+// Timekeeper lists deletion requests (Section 9)
+app.get('/api/admin/deletion-requests', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  if (req.auth!.role !== 'timekeeper') {
+    return res.status(403).json({ error: 'Forbidden: Timekeeper access required' });
+  }
+  const status = req.query.status as string | undefined;
+  const requests = db.listDeletionRequests(status);
+  res.json({ requests });
+});
+
+// Timekeeper approves or rejects deletion request (Section 9: automatically deletes credential upon approval)
+app.post('/api/admin/deletion-requests/:requestId/review', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  if (req.auth!.role !== 'timekeeper') {
+    return res.status(403).json({ error: 'Forbidden: Timekeeper access required' });
+  }
+
+  const requestId = req.params.requestId as string;
+  const { decision } = req.body; // 'approved' | 'rejected'
+
+  if (!['approved', 'rejected'].includes(decision)) {
+    return res.status(400).json({ error: "Decision must be 'approved' or 'rejected'" });
+  }
+
+  const deletionReq = db.getDeletionRequest(requestId);
+  if (!deletionReq) {
+    return res.status(404).json({ error: 'Deletion request not found' });
+  }
+
+  deletionReq.status = decision;
+  deletionReq.reviewedBy = req.auth!.userId;
+  deletionReq.reviewedAt = new Date().toISOString();
+
+  // If approved, automatically delete the credential! (Section 9: "Do not make the agent repeat unnecessary deletion operations")
+  if (decision === 'approved') {
+    db.deletePlatformCredential(deletionReq.clientId, deletionReq.credentialId);
+  }
+
+  db.saveDeletionRequest(deletionReq);
+
+  LokiAuditService.recordEvent({
+    orgId: req.auth!.orgId,
+    userId: req.auth!.userId,
+    action: `DELETION_REQUEST_${decision.toUpperCase()}`,
+    resourceType: 'deletion_request',
+    resourceId: requestId,
+    metadata: { decision, requestedBy: deletionReq.requestedByEmail },
+  });
+
+  res.json({ success: true, request: deletionReq });
+});
+
+// --- IMMEDIATE DELETION WITH AUTHORIZATION CODE (Section 10, 11, 12, 13, 45) ---
+// Agent provides an authorization code from an active supervising Timekeeper ("Under observation of")
+app.post('/api/clients/:clientId/platforms/:platformId/delete-with-code', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const clientId = req.params.clientId as string;
+    const platformId = req.params.platformId as string;
+    const { authorizationCode } = req.body;
+
+    if (!authorizationCode || typeof authorizationCode !== 'string') {
+      return res.status(400).json({ error: 'Authorization code is required' });
+    }
+
+    const agentUser = db.getUser(req.auth!.userId);
+    if (!agentUser || !agentUser.isActive) {
+      return res.status(403).json({ error: 'Agent account inactive' });
+    }
+
+    // Rate-limiting check (Section 10, 45)
+    const trackerKey = `code:${req.auth!.userId}`;
+    const tracker = codeAttemptTracker[trackerKey] || { attempts: 0, blockedUntil: 0 };
+    const now = Date.now();
+
+    if (tracker.blockedUntil > now) {
+      const waitSec = Math.ceil((tracker.blockedUntil - now) / 1000);
+      return res.status(429).json({ error: `Too many failed attempts. Try again in ${waitSec} seconds.` });
+    }
+
+    LokiAuthorizationService.authorizeClient(req.auth!, clientId, 'read');
+
+    const cred = db.getPlatformCredential(clientId, platformId);
+    if (!cred) return res.status(404).json({ error: 'Credential not found' });
+
+    // Section 11, 12: Check supervising timekeepers ("Under observation of")
+    const supervisors = agentUser.supervisingTimekeepers || [];
+    if (supervisors.length === 0) {
+      return res.status(403).json({
+        error: 'No active supervising Timekeeper assigned to your account. Emergency code deletion unavailable.',
+      });
+    }
+
+    // Check each active supervising timekeeper's hashed authorization code
+    let verifiedSupervisor: User | null = null;
+    for (const supervisorId of supervisors) {
+      const tk = db.getUser(supervisorId);
+      // Section 13: Timekeeper must be active and in same organization
+      if (tk && tk.isActive && !tk.isSuspended && tk.authCodeHash && tk.authCodeSalt) {
+        const membership = db.getMembership(req.auth!.orgId, tk.id);
+        if (membership && membership.role === 'timekeeper') {
+          const isValid = LokiAuthService.verifyAuthorizationCode(authorizationCode, tk.authCodeHash, tk.authCodeSalt);
+          if (isValid) {
+            verifiedSupervisor = tk;
+            break;
+          }
+        }
+      }
+    }
+
+    if (!verifiedSupervisor) {
+      // Failed attempt
+      tracker.attempts += 1;
+      if (tracker.attempts >= 5) {
+        tracker.blockedUntil = now + 5 * 60 * 1000; // 5 minute lockout
+      }
+      codeAttemptTracker[trackerKey] = tracker;
+
+      LokiAuditService.recordEvent({
+        orgId: req.auth!.orgId,
+        userId: req.auth!.userId,
+        action: 'AUTH_CODE_FAILED',
+        resourceType: 'platform_credential',
+        resourceId: platformId,
+        metadata: { attempts: tracker.attempts },
+      });
+
+      return res.status(403).json({
+        error: 'Invalid authorization code or supervising Timekeeper is inactive/unrelated.',
+      });
+    }
+
+    // Success! Reset attempts
+    delete codeAttemptTracker[trackerKey];
+
+    // Delete credential immediately (Section 10)
+    db.deletePlatformCredential(clientId, platformId);
+
+    LokiAuditService.recordEvent({
+      orgId: req.auth!.orgId,
+      userId: req.auth!.userId,
+      action: 'AUTH_CODE_SUCCESS_DELETED',
+      resourceType: 'platform_credential',
+      resourceId: platformId,
+      metadata: { authorizedByTimekeeper: verifiedSupervisor.email, clientId },
+    });
+
+    res.json({ success: true, message: `Credential deleted using authorization code of ${verifiedSupervisor.email}` });
+  } catch (err: any) {
+    res.status(403).json({ error: err.message });
+  }
+});
+
+// --- PASSWORD OVERRIDE WORKFLOW (Section 7) ---
+app.post('/api/clients/:clientId/platforms/:platformId/request-override', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  const clientId = req.params.clientId as string;
+  const platformId = req.params.platformId as string;
+  const { reason } = req.body;
+
+  const overrideId = crypto.randomUUID();
+  const override: PasswordOverrideRequest = {
+    id: overrideId,
+    clientId,
+    credentialId: platformId,
+    requestedByUserId: req.auth!.userId,
+    requestedByEmail: req.auth!.email,
+    reason: reason || 'Unknown old password - requested timekeeper override',
+    status: 'pending',
+    createdAt: new Date().toISOString(),
+  };
+
+  db.savePasswordOverrideRequest(override);
+
+  LokiAuditService.recordEvent({
+    orgId: req.auth!.orgId,
+    userId: req.auth!.userId,
+    action: 'OVERRIDE_REQUEST_CREATED',
+    resourceType: 'override_request',
+    resourceId: overrideId,
+    metadata: { clientId, credentialId: platformId },
+  });
+
+  res.status(201).json({ success: true, request: override });
+});
+
+app.post('/api/admin/override-requests/:requestId/review', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  if (req.auth!.role !== 'timekeeper') {
+    return res.status(403).json({ error: 'Forbidden: Timekeeper access required' });
+  }
+
+  const requestId = req.params.requestId as string;
+  const { decision } = req.body;
+
+  if (!['approved', 'rejected'].includes(decision)) {
+    return res.status(400).json({ error: "Decision must be 'approved' or 'rejected'" });
+  }
+
+  const override = db.getPasswordOverrideRequest(requestId);
+  if (!override) return res.status(404).json({ error: 'Override request not found' });
+
+  override.status = decision;
+  override.reviewedBy = req.auth!.userId;
+  override.reviewedAt = new Date().toISOString();
+
+  db.savePasswordOverrideRequest(override);
+
+  LokiAuditService.recordEvent({
+    orgId: req.auth!.orgId,
+    userId: req.auth!.userId,
+    action: `OVERRIDE_REQUEST_${decision.toUpperCase()}`,
+    resourceType: 'override_request',
+    resourceId: requestId,
+    metadata: { decision, requestedBy: override.requestedByEmail },
+  });
+
+  res.json({ success: true, request: override });
 });
 
 // --- AUDIT & DASHBOARD ROUTES ---
 app.get('/api/audit-logs', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  LokiAuthorizationService.authorizeAction(req.auth!.role, 'read');
+  if (req.auth!.role !== 'timekeeper') {
+    return res.status(403).json({ error: 'Forbidden: Timekeeper access required for audit trails' });
+  }
   const logs = LokiAuditService.getOrgLogs(req.auth!.orgId);
   const integrity = LokiAuditService.verifyChainIntegrity(req.auth!.orgId);
   res.json({ logs, integrity });
 });
 
-// Emergency Lockdown Trigger
+// Emergency Lockdown Trigger (Section 3)
 app.post('/api/org/lockdown', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  LokiAuthorizationService.authorizeAction(req.auth!.role, 'lockdown');
+  if (req.auth!.role !== 'timekeeper') {
+    return res.status(403).json({ error: 'Forbidden: Timekeeper access required' });
+  }
   const { reason } = req.body;
 
   const org = db.getOrg(req.auth!.orgId);
@@ -774,7 +1240,6 @@ app.post('/api/org/lockdown', requireAuth, (req: AuthenticatedRequest, res: Resp
   org.lockdownReason = reason || 'Security Incident Lockdown';
   org.lockdownAt = new Date().toISOString();
 
-  // Terminate all sessions across organization except current owner session
   db.revokeAllOrgSessions(req.auth!.orgId, req.auth!.userId);
 
   LokiAuditService.recordEvent({
