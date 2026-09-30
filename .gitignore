@@ -17,6 +17,12 @@ build/
 .env.test.local
 .env.production.local
 *.local
+firebase-data.md
+firebase-data.json
+firebase-data.*
+serviceAccountKey.json
+*-adminsdk-*.json
+*.pem
 
 # Firebase caches & logs
 .firebase/
