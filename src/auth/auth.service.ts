@@ -76,6 +76,79 @@ export class LokiAuthService {
   }
 
   /**
+   * RFC 5322 Compliant Email Structure Validator
+   * Validates full email structure, local part (letters, numbers, '.', '_', '%', '+', '-'),
+   * prevents consecutive dots, whitespace, multiple '@' symbols, and verifies valid domain syntax.
+   */
+  static validateEmailStructure(rawEmail: string): { valid: boolean; normalized: string; error?: string } {
+    if (!rawEmail || typeof rawEmail !== 'string') {
+      return { valid: false, normalized: '', error: 'Email address is required.' };
+    }
+    const trimmed = rawEmail.trim();
+    if (trimmed.length === 0) {
+      return { valid: false, normalized: '', error: 'Email address cannot be empty.' };
+    }
+    if (/\s/.test(trimmed)) {
+      return { valid: false, normalized: trimmed, error: 'Email address cannot contain whitespace.' };
+    }
+    const parts = trimmed.split('@');
+    if (parts.length !== 2) {
+      return { valid: false, normalized: trimmed, error: 'Email address must contain exactly one "@" symbol.' };
+    }
+    const [local, domain] = parts;
+    if (!local || local.length === 0 || local.length > 64) {
+      return { valid: false, normalized: trimmed, error: 'Email local part must be between 1 and 64 characters.' };
+    }
+    if (!domain || domain.length === 0 || domain.length > 255) {
+      return { valid: false, normalized: trimmed, error: 'Email domain must be between 1 and 255 characters.' };
+    }
+    if (local.startsWith('.') || local.endsWith('.')) {
+      return { valid: false, normalized: trimmed, error: 'Email local part cannot begin or end with a dot.' };
+    }
+    if (local.includes('..')) {
+      return { valid: false, normalized: trimmed, error: 'Email local part cannot contain consecutive dots.' };
+    }
+    const localRegex = /^[a-zA-Z0-9._%+-]+$/;
+    if (!localRegex.test(local)) {
+      return { valid: false, normalized: trimmed, error: 'Email contains invalid characters in username.' };
+    }
+
+    if (domain.startsWith('.') || domain.endsWith('.') || domain.includes('..')) {
+      return { valid: false, normalized: trimmed, error: 'Email domain has invalid dot placement.' };
+    }
+    const domainLabels = domain.split('.');
+    if (domainLabels.length < 2) {
+      return { valid: false, normalized: trimmed, error: 'Email domain must include a top-level domain.' };
+    }
+    const labelRegex = /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/;
+    for (const label of domainLabels) {
+      if (!labelRegex.test(label)) {
+        return { valid: false, normalized: trimmed, error: `Invalid domain component: "${label}".` };
+      }
+    }
+    const tld = domainLabels[domainLabels.length - 1];
+    if (tld.length < 2 || !/^[a-zA-Z]+$/.test(tld)) {
+      return { valid: false, normalized: trimmed, error: 'Top-level domain must be at least 2 alphabetic characters.' };
+    }
+
+    return { valid: true, normalized: trimmed.toLowerCase() };
+  }
+
+  /**
+   * Domain Whitelist Validator
+   * Checks if normalized email matches any of the active allowed domains (e.g. '@gmail.com', '@mybusinessmate.ai').
+   * Enforces exact suffix matching so '@fakegmail.com' does not match '@gmail.com'.
+   */
+  static isDomainAllowed(normalizedEmail: string, allowedDomains: string[]): boolean {
+    const emailLower = normalizedEmail.trim().toLowerCase();
+    return allowedDomains.some((domain) => {
+      const cleanDomain = domain.trim().toLowerCase();
+      const domainWithAt = cleanDomain.startsWith('@') ? cleanDomain : `@${cleanDomain}`;
+      return emailLower.endsWith(domainWithAt);
+    });
+  }
+
+  /**
    * Hash account login password using Argon2id (Section 18)
    */
   static async hashLoginPassword(password: string): Promise<string> {

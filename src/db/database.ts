@@ -34,13 +34,14 @@ export class LokiDatabase {
   public folders: Map<string, VaultFolder> = new Map();
   public vaultItems: Map<string, VaultItem> = new Map();
   public sessions: Map<string, SessionRecord> = new Map();
+  public allowedDomains: Set<string> = new Set(['@gmail.com', '@mybusinessmate.ai']);
 
   constructor() {
     this.seedDefaultState();
   }
 
   seedDefaultState() {
-    // Dynamically initialized or loaded per test
+    this.allowedDomains = new Set(['@gmail.com', '@mybusinessmate.ai']);
   }
 
   clear() {
@@ -57,6 +58,64 @@ export class LokiDatabase {
     this.folders.clear();
     this.vaultItems.clear();
     this.sessions.clear();
+    this.allowedDomains = new Set(['@gmail.com', '@mybusinessmate.ai']);
+  }
+
+  // --- Domain Authentication Operations ---
+  getAllowedDomains(): string[] {
+    return Array.from(this.allowedDomains);
+  }
+
+  addAllowedDomain(domain: string): { success: boolean; error?: string } {
+    const clean = domain.trim().toLowerCase();
+    const formatted = clean.startsWith('@') ? clean : `@${clean}`;
+    if (!/^@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(formatted)) {
+      return { success: false, error: 'Invalid domain format. Example: @mybusinessmate.ai' };
+    }
+    this.allowedDomains.add(formatted);
+    return { success: true };
+  }
+
+  removeAllowedDomain(domain: string): { success: boolean; error?: string } {
+    const clean = domain.trim().toLowerCase();
+    const formatted = clean.startsWith('@') ? clean : `@${clean}`;
+    if (this.allowedDomains.size <= 1) {
+      return { success: false, error: 'Cannot remove the only remaining allowed domain.' };
+    }
+    if (!this.allowedDomains.has(formatted)) {
+      return { success: false, error: 'Domain not found.' };
+    }
+    this.allowedDomains.delete(formatted);
+    return { success: true };
+  }
+
+  updateAllowedDomain(oldDomain: string, newDomain: string): { success: boolean; error?: string } {
+    const cleanOld = oldDomain.trim().toLowerCase();
+    const oldFormatted = cleanOld.startsWith('@') ? cleanOld : `@${cleanOld}`;
+    const cleanNew = newDomain.trim().toLowerCase();
+    const newFormatted = cleanNew.startsWith('@') ? cleanNew : `@${cleanNew}`;
+
+    if (!/^@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(newFormatted)) {
+      return { success: false, error: 'Invalid new domain format.' };
+    }
+    if (!this.allowedDomains.has(oldFormatted)) {
+      return { success: false, error: 'Original domain not found.' };
+    }
+    this.allowedDomains.delete(oldFormatted);
+    this.allowedDomains.add(newFormatted);
+    return { success: true };
+  }
+
+  // --- Reset User Data (Section 6 & 12 Clean Reset) ---
+  resetUserData(): void {
+    this.users.clear();
+    this.userCryptoKeys.clear();
+    this.memberships.clear();
+    this.sessions.clear();
+    this.vaultKeyWrappers.clear();
+    this.deletionRequests.clear();
+    this.overrideRequests.clear();
+    this.allowedDomains = new Set(['@gmail.com', '@mybusinessmate.ai']);
   }
 
   // --- User Operations ---

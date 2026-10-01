@@ -2,33 +2,50 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Loki Agency Vault Security Rules (Section 34, 47)
-    // Production Cloud Firestore Access for Users, Clients, Platform Credentials,
-    // Deletion Requests, Override Requests, and Audit Trails.
+    // Loki Agency Vault Hardened Firestore Security Rules (Section 8, 34, 47)
+    // Strictly prohibits unauthorized public access. Zero 'allow read, write: if true;'
+
+    match /settings/{settingId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && request.auth.token.role == 'timekeeper';
+    }
 
     match /users/{userId} {
-      allow read, write: if true;
+      // User can view their own profile; Timekeepers can view/update team profiles
+      allow read: if request.auth != null && (request.auth.uid == userId || request.auth.token.role == 'timekeeper');
+      allow write: if request.auth != null && (request.auth.uid == userId || request.auth.token.role == 'timekeeper');
     }
 
     match /clients/{clientId} {
-      allow read, write: if true;
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && request.auth.token.role == 'timekeeper';
 
-      // Client-separated platform credential tables
       match /platforms/{platformId} {
-        allow read, write: if true;
+        allow read: if request.auth != null;
+        allow write: if request.auth != null && (request.auth.token.role == 'timekeeper' || request.auth.token.role == 'agent');
+        allow delete: if request.auth != null && request.auth.token.role == 'timekeeper';
       }
     }
 
     match /deletion_requests/{reqId} {
-      allow read, write: if true;
+      allow read: if request.auth != null;
+      allow write: if request.auth != null;
     }
 
     match /override_requests/{reqId} {
-      allow read, write: if true;
+      allow read: if request.auth != null;
+      allow write: if request.auth != null;
     }
 
     match /audit_logs/{logId} {
-      allow read, write: if true;
+      allow read: if request.auth != null && request.auth.token.role == 'timekeeper';
+      allow create: if request.auth != null;
+      allow update, delete: if false; // Append-only immutable log
+    }
+
+    // Default deny all other unspecified paths
+    match /{document=**} {
+      allow read, write: if false;
     }
   }
 }

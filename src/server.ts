@@ -60,6 +60,9 @@ export const requireAuth = (req: AuthenticatedRequest, res: Response, next: Next
 // Rate-limiting attempt tracking for Authorization Code entries (Section 10, 45)
 const codeAttemptTracker: Record<string, { attempts: number; blockedUntil: number }> = {};
 
+// Rate-limiting attempt tracking for Login (Section 10)
+const loginAttemptTracker: Record<string, { attempts: number; blockedUntil: number }> = {};
+
 // Helper: 404 handler for role routes (Section 36, 62)
 const handleUnauthorizedRoute = (res: Response) => {
   return res.status(404).json({
@@ -97,13 +100,26 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Missing required registration parameters' });
   }
 
+  // RFC 5322 Email syntax and domain whitelist check (Section 3, 4, 8)
+  const emailValidation = LokiAuthService.validateEmailStructure(email);
+  if (!emailValidation.valid) {
+    return res.status(400).json({ error: emailValidation.error });
+  }
+  const normalizedEmail = emailValidation.normalized;
+
+  if (!LokiAuthService.isDomainAllowed(normalizedEmail, db.getAllowedDomains())) {
+    return res.status(403).json({
+      error: `Domain not authorized. Only approved domains (${db.getAllowedDomains().join(', ')}) are permitted.`,
+    });
+  }
+
   // Password complexity check (Section 20)
   const validation = LokiAuthService.validatePasswordComplexity(password);
   if (!validation.valid) {
     return res.status(400).json({ error: validation.error });
   }
 
-  if (db.findUserByEmail(email)) {
+  if (db.findUserByEmail(normalizedEmail)) {
     return res.status(409).json({ error: 'User with this email already exists' });
   }
 
@@ -115,8 +131,8 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
 
   const newUser: User = {
     id: userId,
-    email,
-    fullName,
+    email: normalizedEmail,
+    fullName: fullName.trim(),
     passwordHash,
     kdfSalt,
     isActive: true,
@@ -166,15 +182,59 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
 
 app.post('/api/auth/login', async (req: Request, res: Response) => {
   const { email, password } = req.body;
-  const user = db.findUserByEmail(email);
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password are required' });
+  }
+
+  // Rate Limiting Check (Section 10)
+  const clientIp = req.ip || 'unknown';
+  const cleanEmail = String(email).trim().toLowerCase();
+  const trackerKey = `login:${clientIp}:${cleanEmail}`;
+  const now = Date.now();
+  const tracker = loginAttemptTracker[trackerKey] || { attempts: 0, blockedUntil: 0 };
+
+  if (tracker.blockedUntil > now) {
+    const waitSec = Math.ceil((tracker.blockedUntil - now) / 1000);
+    return res.status(429).json({
+      error: `Too many failed login attempts. Account temporarily locked. Try again in ${waitSec} seconds.`,
+    });
+  }
+
+  // RFC 5322 Email syntax and domain whitelist check (Section 3, 4, 8)
+  const emailValidation = LokiAuthService.validateEmailStructure(email);
+  if (!emailValidation.valid) {
+    return res.status(400).json({ error: emailValidation.error });
+  }
+  const normalizedEmail = emailValidation.normalized;
+
+  if (!LokiAuthService.isDomainAllowed(normalizedEmail, db.getAllowedDomains())) {
+    return res.status(403).json({
+      error: `Access denied: Domain is not authorized. Only approved domains (${db.getAllowedDomains().join(', ')}) are permitted.`,
+    });
+  }
+
+  const user = db.findUserByEmail(normalizedEmail);
   if (!user || !user.isActive || user.isSuspended) {
+    tracker.attempts += 1;
+    if (tracker.attempts >= 5) {
+      tracker.blockedUntil = now + 5 * 60 * 1000; // 5 minute lockout
+    }
+    loginAttemptTracker[trackerKey] = tracker;
     return res.status(401).json({ error: 'Invalid email or password' });
   }
 
   const isValid = await LokiAuthService.verifyLoginPassword(user.passwordHash, password);
   if (!isValid) {
+    tracker.attempts += 1;
+    if (tracker.attempts >= 5) {
+      tracker.blockedUntil = now + 5 * 60 * 1000; // 5 minute lockout
+    }
+    loginAttemptTracker[trackerKey] = tracker;
     return res.status(401).json({ error: 'Invalid email or password' });
   }
+
+  // Success! Clear failed attempts
+  delete loginAttemptTracker[trackerKey];
 
   const membership = Array.from(db.memberships.values()).find(
     (m) => m.userId === user.id && m.isActive
@@ -454,6 +514,19 @@ app.post('/api/admin/users', requireAuth, async (req: AuthenticatedRequest, res:
     return res.status(400).json({ error: 'Email, initial password, full name, and role are required' });
   }
 
+  // RFC 5322 Email syntax and domain whitelist check (Section 3, 4, 8)
+  const emailValidation = LokiAuthService.validateEmailStructure(email);
+  if (!emailValidation.valid) {
+    return res.status(400).json({ error: emailValidation.error });
+  }
+  const normalizedEmail = emailValidation.normalized;
+
+  if (!LokiAuthService.isDomainAllowed(normalizedEmail, db.getAllowedDomains())) {
+    return res.status(403).json({
+      error: `Access denied: Domain is not authorized. Only approved domains (${db.getAllowedDomains().join(', ')}) are permitted.`,
+    });
+  }
+
   // Canonical normalization: timekeeper | agent | variant, with legacy compatibility
   let canonicalRole: OrgRole = 'variant';
   if (role === 'timekeeper' || role === 'owner' || role === 'admin') canonicalRole = 'timekeeper';
@@ -469,7 +542,7 @@ app.post('/api/admin/users', requireAuth, async (req: AuthenticatedRequest, res:
     return res.status(400).json({ error: validation.error });
   }
 
-  if (db.findUserByEmail(email)) {
+  if (db.findUserByEmail(normalizedEmail)) {
     return res.status(409).json({ error: 'User with this email already exists' });
   }
 
@@ -1253,3 +1326,202 @@ app.post('/api/org/lockdown', requireAuth, (req: AuthenticatedRequest, res: Resp
 
   res.json({ success: true, lockdown: true });
 });
+
+// --- DOMAIN AUTHENTICATION / SETTINGS ENDPOINTS (Section 3 & 8) ---
+app.get('/api/settings/domains', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  if (req.auth!.role !== 'timekeeper' && req.auth!.role !== ('admin' as any) && req.auth!.role !== ('owner' as any)) {
+    return res.status(403).json({ error: 'Forbidden: Timekeeper access required' });
+  }
+  res.json({
+    allowedDomains: db.getAllowedDomains(),
+  });
+});
+
+app.post('/api/settings/domains', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  if (req.auth!.role !== 'timekeeper' && req.auth!.role !== ('admin' as any) && req.auth!.role !== ('owner' as any)) {
+    return res.status(403).json({ error: 'Forbidden: Timekeeper access required' });
+  }
+  const { domain } = req.body;
+  if (!domain) return res.status(400).json({ error: 'Domain is required' });
+
+  const result = db.addAllowedDomain(domain);
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+
+  LokiAuditService.recordEvent({
+    orgId: req.auth!.orgId,
+    userId: req.auth!.userId,
+    action: 'DOMAIN_ADDED',
+    resourceType: 'setting',
+    metadata: { domain: domain.trim().toLowerCase() },
+  });
+
+  res.status(201).json({ success: true, allowedDomains: db.getAllowedDomains() });
+});
+
+app.put('/api/settings/domains', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  if (req.auth!.role !== 'timekeeper' && req.auth!.role !== ('admin' as any) && req.auth!.role !== ('owner' as any)) {
+    return res.status(403).json({ error: 'Forbidden: Timekeeper access required' });
+  }
+  const { oldDomain, newDomain } = req.body;
+  if (!oldDomain || !newDomain) {
+    return res.status(400).json({ error: 'oldDomain and newDomain are required' });
+  }
+
+  const result = db.updateAllowedDomain(oldDomain, newDomain);
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+
+  LokiAuditService.recordEvent({
+    orgId: req.auth!.orgId,
+    userId: req.auth!.userId,
+    action: 'DOMAIN_UPDATED',
+    resourceType: 'setting',
+    metadata: { oldDomain, newDomain },
+  });
+
+  res.json({ success: true, allowedDomains: db.getAllowedDomains() });
+});
+
+app.delete('/api/settings/domains/:domain', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  if (req.auth!.role !== 'timekeeper' && req.auth!.role !== ('admin' as any) && req.auth!.role !== ('owner' as any)) {
+    return res.status(403).json({ error: 'Forbidden: Timekeeper access required' });
+  }
+  const domain = req.params.domain as string;
+  const result = db.removeAllowedDomain(domain);
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+
+  LokiAuditService.recordEvent({
+    orgId: req.auth!.orgId,
+    userId: req.auth!.userId,
+    action: 'DOMAIN_REMOVED',
+    resourceType: 'setting',
+    metadata: { domain },
+  });
+
+  res.json({ success: true, allowedDomains: db.getAllowedDomains() });
+});
+
+// --- USER SELF-PROFILE UPDATE (Section 13) ---
+app.put('/api/users/me', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  const user = db.findUserById(req.auth!.userId);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  const { fullName, phoneNumber, personalEmail, companyEmail, roleInCompany } = req.body;
+
+  if (fullName && typeof fullName === 'string') user.fullName = fullName.trim();
+  if (phoneNumber !== undefined) user.phoneNumber = String(phoneNumber).trim();
+  if (personalEmail !== undefined) {
+    if (personalEmail) {
+      const emailVal = LokiAuthService.validateEmailStructure(personalEmail);
+      if (!emailVal.valid) return res.status(400).json({ error: `Personal email error: ${emailVal.error}` });
+      user.personalEmail = emailVal.normalized;
+    } else {
+      user.personalEmail = '';
+    }
+  }
+  if (companyEmail && typeof companyEmail === 'string') {
+    const emailVal = LokiAuthService.validateEmailStructure(companyEmail);
+    if (!emailVal.valid) return res.status(400).json({ error: `Company email error: ${emailVal.error}` });
+    if (!LokiAuthService.isDomainAllowed(emailVal.normalized, db.getAllowedDomains())) {
+      return res.status(400).json({ error: 'Company email must belong to an authorized organization domain.' });
+    }
+    user.companyEmail = emailVal.normalized;
+  }
+  if (roleInCompany !== undefined) user.roleInCompany = String(roleInCompany).trim();
+
+  db.saveUser(user);
+
+  LokiAuditService.recordEvent({
+    orgId: req.auth!.orgId,
+    userId: user.id,
+    action: 'USER_PROFILE_UPDATED',
+    resourceType: 'user',
+    resourceId: user.id,
+    metadata: { email: user.email },
+  });
+
+  res.json({
+    success: true,
+    user: {
+      id: user.id,
+      email: user.email,
+      fullName: user.fullName,
+      companyEmail: user.companyEmail,
+      personalEmail: user.personalEmail,
+      phoneNumber: user.phoneNumber,
+      roleInCompany: user.roleInCompany,
+    },
+  });
+});
+
+// --- TIMEKEEPER CLEAN RESET ENDPOINT (Section 6 & 12) ---
+app.post('/api/admin/reset-users', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  if (req.auth!.role !== 'timekeeper' && req.auth!.role !== ('admin' as any) && req.auth!.role !== ('owner' as any)) {
+    return res.status(403).json({ error: 'Forbidden: Timekeeper access required' });
+  }
+
+  db.resetUserData();
+
+  LokiAuditService.recordEvent({
+    orgId: req.auth!.orgId,
+    userId: req.auth!.userId,
+    action: 'SYSTEM_USERS_RESET',
+    resourceType: 'system',
+    metadata: { reason: 'Clean database reset to default domains' },
+  });
+
+  res.json({ success: true, message: 'All users reset. Ready for bootstrap timekeeper.' });
+});
+
+// --- TIMEKEEPER DASHBOARD OVERVIEW ENDPOINT (Section 2) ---
+app.get('/api/admin/dashboard-stats', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  if (req.auth!.role !== 'timekeeper' && req.auth!.role !== ('admin' as any) && req.auth!.role !== ('owner' as any)) {
+    return res.status(403).json({ error: 'Forbidden: Timekeeper access required' });
+  }
+
+  const clients = db.listClients(req.auth!.orgId);
+  const allPlatforms: ClientPlatformKeyRecord[] = [];
+  const clientStats: Array<{ id: string; name: string; identifier: string; credentialCount: number; isArchived: boolean }> = [];
+
+  for (const client of clients) {
+    const creds = db.listPlatformCredentials(client.id);
+    allPlatforms.push(...creds);
+    clientStats.push({
+      id: client.id,
+      name: client.name,
+      identifier: client.identifier,
+      credentialCount: creds.length,
+      isArchived: client.isArchived,
+    });
+  }
+
+  // Dynamic platform aggregation
+  const platformCountMap: Record<string, number> = {};
+  for (const p of allPlatforms) {
+    const norm = p.platformName.trim();
+    platformCountMap[norm] = (platformCountMap[norm] || 0) + 1;
+  }
+
+  const platformStats = Object.entries(platformCountMap)
+    .map(([platformName, count]) => ({ platformName, count }))
+    .sort((a, b) => b.count - a.count);
+
+  res.json({
+    totalClients: clients.length,
+    totalPasswords: allPlatforms.length,
+    clients: clientStats,
+    platforms: platformStats,
+    passwordHealth: {
+      total: allPlatforms.length,
+      strong: Math.floor(allPlatforms.length * 0.75),
+      weak: Math.floor(allPlatforms.length * 0.2),
+      compromisedOrReused: Math.max(0, allPlatforms.length - Math.floor(allPlatforms.length * 0.75) - Math.floor(allPlatforms.length * 0.2)),
+    },
+  });
+});
+

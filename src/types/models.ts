@@ -183,8 +183,29 @@ export interface ClientPlatformKeyRecord {
   passwordCiphertext: string;
   passwordNonce: string;
   usernameCiphertext?: string;
+  usernameNonce?: string;
   url?: string;
   createdAt: string;
   updatedAt: string;
   createdBy: string;
 }
+
+export interface AllowedDomainRecord {
+  domain: string;
+  addedBy?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PasswordHealthStats {
+  total: number;
+  strong: number;
+  weak: number;
+  compromisedOrReused: number;
+}
+
+export interface PlatformCountStat {
+  platformName: string;
+  count: number;
+}
+

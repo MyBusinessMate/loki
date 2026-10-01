@@ -158,13 +158,50 @@ export class LokiFirebaseService {
 
   /**
    * Store and manage RBAC User Profiles in Firestore
+   * Strictly sanitizes to ensure password hashes or auth codes are never stored in Cloud Firestore.
    */
-  public static async saveUserProfile(user: LokiFirestoreUser & { passwordHash?: string }): Promise<void> {
+  public static async saveUserProfile(user: LokiFirestoreUser & { passwordHash?: string; authCodeHash?: string }): Promise<void> {
     const firestore = this.getDb();
     if (!firestore) return;
     const userRef = doc(firestore, 'users', user.id);
+
+    // Section 7 & 8: Strip sensitive auth hashes before saving to Cloud Firestore
+    const sanitized = { ...user };
+    delete (sanitized as any).passwordHash;
+    delete (sanitized as any).authCodeHash;
+    delete (sanitized as any).authCodeSalt;
+
     await setDoc(userRef, {
-      ...user,
+      ...sanitized,
+      updatedAt: new Date().toISOString(),
+    }, { merge: true });
+  }
+
+  /**
+   * Retrieve allowed email domains from Firestore settings
+   */
+  public static async getAllowedDomains(): Promise<string[]> {
+    const firestore = this.getDb();
+    if (!firestore) return ['@gmail.com', '@mybusinessmate.ai'];
+    try {
+      const docRef = doc(firestore, 'settings', 'domains');
+      const snap = await getDoc(docRef);
+      if (snap.exists() && Array.isArray(snap.data()?.allowedDomains) && snap.data().allowedDomains.length > 0) {
+        return snap.data().allowedDomains;
+      }
+    } catch {}
+    return ['@gmail.com', '@mybusinessmate.ai'];
+  }
+
+  /**
+   * Persist allowed email domains to Firestore settings
+   */
+  public static async saveAllowedDomains(domains: string[]): Promise<void> {
+    const firestore = this.getDb();
+    if (!firestore) return;
+    const docRef = doc(firestore, 'settings', 'domains');
+    await setDoc(docRef, {
+      allowedDomains: domains,
       updatedAt: new Date().toISOString(),
     }, { merge: true });
   }

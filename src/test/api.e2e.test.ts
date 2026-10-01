@@ -12,6 +12,9 @@ describe('Loki End-to-End API Security Test Suite (Section 49, 52, 57 Compliance
 
   beforeEach(() => {
     db.clear();
+    db.addAllowedDomain('@loki.dev');
+    db.addAllowedDomain('@agency.com');
+    db.addAllowedDomain('@loki.com');
   });
 
   it('TEST-E2E-01: Complete User Registration, Key Generation, and Login', async () => {
@@ -611,5 +614,184 @@ describe('Loki End-to-End API Security Test Suite (Section 49, 52, 57 Compliance
 
     expect(approvedEditRes.status).toBe(200);
     expect(approvedEditRes.body.credential.passwordCiphertext).toBe('brand_new_admin_overridden_ciphertext');
+  });
+
+  it('TEST-E2E-08: Email RFC 5322 validation and domain whitelist enforcement', async () => {
+    const keyPair = await LokiCryptoService.generateUserKeyPair();
+    const salt = await LokiCryptoService.generateSalt();
+    const kek = await LokiCryptoService.deriveKEK('PassWord#12345', salt);
+    const encPkg = await LokiCryptoService.encryptPrivateKey(keyPair.privateKey, kek);
+
+    // 1. Rejects invalid email structure (missing domain, spaces, multiple @)
+    const invalidEmailRes = await request(app)
+      .post('/api/auth/register')
+      .set('X-Loki-CSRF-Protection', '1')
+      .send({
+        email: 'bad email@something',
+        password: 'PassWord#12345',
+        fullName: 'Test User',
+        kdfSalt: salt,
+        publicKey: keyPair.publicKey,
+        encryptedPrivateKey: encPkg.encryptedPrivateKey,
+        privateKeyNonce: encPkg.nonce,
+      });
+    expect(invalidEmailRes.status).toBe(400);
+
+    // 2. Rejects unauthorized domain (e.g. @yahoo.com)
+    const unauthDomainRes = await request(app)
+      .post('/api/auth/register')
+      .set('X-Loki-CSRF-Protection', '1')
+      .send({
+        email: 'hacker@yahoo.com',
+        password: 'PassWord#12345',
+        fullName: 'Test Hacker',
+        kdfSalt: salt,
+        publicKey: keyPair.publicKey,
+        encryptedPrivateKey: encPkg.encryptedPrivateKey,
+        privateKeyNonce: encPkg.nonce,
+      });
+    expect(unauthDomainRes.status).toBe(403);
+    expect(unauthDomainRes.body.error).toContain('Domain not authorized');
+
+    // 3. Allows valid RFC 5322 email with hyphen and authorized domain (@mybusinessmate.ai)
+    const validEmailRes = await request(app)
+      .post('/api/auth/register')
+      .set('X-Loki-CSRF-Protection', '1')
+      .send({
+        email: 'Shezan-op@mybusinessmate.ai',
+        password: 'PassWord#12345',
+        fullName: 'Shezan Specialist',
+        kdfSalt: salt,
+        publicKey: keyPair.publicKey,
+        encryptedPrivateKey: encPkg.encryptedPrivateKey,
+        privateKeyNonce: encPkg.nonce,
+      });
+    expect(validEmailRes.status).toBe(201);
+    expect(validEmailRes.body.user.email).toBe('shezan-op@mybusinessmate.ai');
+  });
+
+  it('TEST-E2E-09: Domain Authentication Settings (Add, Edit, Remove, View)', async () => {
+    // 1. Register timekeeper
+    const keyPair = await LokiCryptoService.generateUserKeyPair();
+    const salt = await LokiCryptoService.generateSalt();
+    const kek = await LokiCryptoService.deriveKEK('MasterPass#2026', salt);
+    const encPkg = await LokiCryptoService.encryptPrivateKey(keyPair.privateKey, kek);
+
+    const reg = await request(app)
+      .post('/api/auth/register')
+      .set('X-Loki-CSRF-Protection', '1')
+      .send({
+        email: 'admin.domains@mybusinessmate.ai',
+        password: 'MasterPass#2026',
+        fullName: 'Domain Admin',
+        kdfSalt: salt,
+        publicKey: keyPair.publicKey,
+        encryptedPrivateKey: encPkg.encryptedPrivateKey,
+        privateKeyNonce: encPkg.nonce,
+      });
+    const token = reg.body.tokens.accessToken;
+
+    // 2. View allowed domains
+    const listRes = await request(app)
+      .get('/api/settings/domains')
+      .set('Authorization', `Bearer ${token}`);
+    expect(listRes.status).toBe(200);
+    expect(listRes.body.allowedDomains).toContain('@gmail.com');
+    expect(listRes.body.allowedDomains).toContain('@mybusinessmate.ai');
+
+    // 3. Add a new allowed domain
+    const addRes = await request(app)
+      .post('/api/settings/domains')
+      .set('Authorization', `Bearer ${token}`)
+      .set('X-Loki-CSRF-Protection', '1')
+      .send({ domain: '@clientorg.com' });
+    expect(addRes.status).toBe(201);
+    expect(addRes.body.allowedDomains).toContain('@clientorg.com');
+
+    // 4. Update the allowed domain
+    const updateRes = await request(app)
+      .put('/api/settings/domains')
+      .set('Authorization', `Bearer ${token}`)
+      .set('X-Loki-CSRF-Protection', '1')
+      .send({ oldDomain: '@clientorg.com', newDomain: '@partneragency.io' });
+    expect(updateRes.status).toBe(200);
+    expect(updateRes.body.allowedDomains).toContain('@partneragency.io');
+    expect(updateRes.body.allowedDomains).not.toContain('@clientorg.com');
+
+    // 5. Remove domain
+    const removeRes = await request(app)
+      .delete('/api/settings/domains/@partneragency.io')
+      .set('Authorization', `Bearer ${token}`)
+      .set('X-Loki-CSRF-Protection', '1');
+    expect(removeRes.status).toBe(200);
+    expect(removeRes.body.allowedDomains).not.toContain('@partneragency.io');
+  });
+
+  it('TEST-E2E-10: Login Rate Limiting lockout after consecutive failed attempts', async () => {
+    // Attempt 5 bad logins to trigger lockout
+    const badCredentials = {
+      email: 'attempt.lockout@gmail.com',
+      password: 'WrongPassword#999',
+    };
+
+    for (let i = 0; i < 5; i++) {
+      await request(app)
+        .post('/api/auth/login')
+        .send(badCredentials);
+    }
+
+    // 6th attempt should be blocked with HTTP 429 Too Many Requests
+    const blockedRes = await request(app)
+      .post('/api/auth/login')
+      .send(badCredentials);
+
+    expect(blockedRes.status).toBe(429);
+    expect(blockedRes.body.error).toContain('Too many failed login attempts');
+  });
+
+  it('TEST-E2E-11: User self-profile updates and Timekeeper dashboard overview analytics', async () => {
+    // 1. Register timekeeper
+    const keyPair = await LokiCryptoService.generateUserKeyPair();
+    const salt = await LokiCryptoService.generateSalt();
+    const kek = await LokiCryptoService.deriveKEK('MasterPass#2026', salt);
+    const encPkg = await LokiCryptoService.encryptPrivateKey(keyPair.privateKey, kek);
+
+    const reg = await request(app)
+      .post('/api/auth/register')
+      .set('X-Loki-CSRF-Protection', '1')
+      .send({
+        email: 'timekeeper.dash@gmail.com',
+        password: 'MasterPass#2026',
+        fullName: 'Initial Name',
+        kdfSalt: salt,
+        publicKey: keyPair.publicKey,
+        encryptedPrivateKey: encPkg.encryptedPrivateKey,
+        privateKeyNonce: encPkg.nonce,
+      });
+    const token = reg.body.tokens.accessToken;
+
+    // 2. Self-profile update
+    const profileUpdate = await request(app)
+      .put('/api/users/me')
+      .set('Authorization', `Bearer ${token}`)
+      .set('X-Loki-CSRF-Protection', '1')
+      .send({
+        fullName: 'Updated Name Timekeeper',
+        phoneNumber: '+1-555-0199',
+        personalEmail: 'personal@gmail.com',
+        roleInCompany: 'Managing Partner',
+      });
+    expect(profileUpdate.status).toBe(200);
+    expect(profileUpdate.body.user.fullName).toBe('Updated Name Timekeeper');
+    expect(profileUpdate.body.user.phoneNumber).toBe('+1-555-0199');
+
+    // 3. Timekeeper dashboard stats
+    const statsRes = await request(app)
+      .get('/api/admin/dashboard-stats')
+      .set('Authorization', `Bearer ${token}`);
+    expect(statsRes.status).toBe(200);
+    expect(statsRes.body.totalClients).toBeDefined();
+    expect(statsRes.body.passwordHealth).toBeDefined();
+    expect(Array.isArray(statsRes.body.platforms)).toBe(true);
   });
 });

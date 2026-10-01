@@ -34,6 +34,12 @@ import {
   UserX,
   ShieldCheck,
   User as UserIcon,
+  BarChart3,
+  Globe,
+  ChevronDown,
+  ChevronUp,
+  Layers,
+  Settings,
 } from 'lucide-react';
 import { LokiCryptoService } from './crypto/crypto.service.js';
 import {
@@ -77,6 +83,7 @@ export interface PlatformCredential {
   platformName: string;
   keyLabel?: string;
   usernameCiphertext?: string;
+  usernameNonce?: string;
   passwordCiphertext: string;
   passwordNonce: string;
   url?: string;
@@ -261,19 +268,18 @@ export default function App() {
   const [showLoginPassword, setShowLoginPassword] = useState(false);
   const [loginFullName, setLoginFullName] = useState('');
   const [loginRole, setLoginRole] = useState<UserRole>('timekeeper');
-  const [isRegisterMode, setIsRegisterMode] = useState(() => {
-    try {
-      const saved = localStorage.getItem('loki_managed_users');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return false;
-      }
-    } catch {}
-    return true;
-  });
+  const [isRegisterMode, setIsRegisterMode] = useState(false);
   const [loginError, setLoginError] = useState('');
   const [loginSuccess, setLoginSuccess] = useState('');
   const [isSyncing, setIsSyncing] = useState(false);
+
+  // Rate Limiting & Account Lockout States (5 failed attempts -> 5 min lockout)
+  const [failedLoginAttempts, setFailedLoginAttempts] = useState(() => {
+    return parseInt(localStorage.getItem('loki_failed_logins') || '0', 10);
+  });
+  const [lockoutUntil, setLockoutUntil] = useState(() => {
+    return parseInt(localStorage.getItem('loki_lockout_until') || '0', 10);
+  });
 
   // --- Mobile Drawer State ---
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -318,8 +324,76 @@ export default function App() {
     return newDek;
   };
 
+  // --- Allowed Email Domains (Default: @gmail.com and @mybusinessmate.ai) ---
+  const [allowedDomains, setAllowedDomains] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('loki_allowed_domains');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {}
+    return ['@gmail.com', '@mybusinessmate.ai'];
+  });
+
+  useEffect(() => {
+    localStorage.setItem('loki_allowed_domains', JSON.stringify(allowedDomains));
+  }, [allowedDomains]);
+
+  const isEmailDomainAllowed = (email: string): boolean => {
+    const normalized = email.trim().toLowerCase();
+    return allowedDomains.some((d) => {
+      const suffix = d.startsWith('@') ? d.toLowerCase() : `@${d.toLowerCase()}`;
+      return normalized.endsWith(suffix);
+    });
+  };
+
+  const [showAddDomainModal, setShowAddDomainModal] = useState(false);
+  const [newDomainInput, setNewDomainInput] = useState('');
+  const [showEditDomainModal, setShowEditDomainModal] = useState(false);
+  const [editingDomainOld, setEditingDomainOld] = useState('');
+  const [editingDomainNew, setEditingDomainNew] = useState('');
+  const [showAllPlatforms, setShowAllPlatforms] = useState(false);
+
+  // --- Clean Slate Reset States ---
+  const [showCleanResetModal, setShowCleanResetModal] = useState(false);
+  const [cleanResetConfirmText, setCleanResetConfirmText] = useState('');
+  const [cleanResetError, setCleanResetError] = useState('');
+
+  // --- Edit User Modal States (Admin Governance) ---
+  const [showEditUserModal, setShowEditUserModal] = useState(false);
+  const [editingUser, setEditingUser] = useState<ManagedUser | null>(null);
+  const [editUserFullName, setEditUserFullName] = useState('');
+  const [editUserRole, setEditUserRole] = useState<UserRole>('agent');
+  const [editUserCompanyEmail, setEditUserCompanyEmail] = useState('');
+  const [editUserPersonalEmail, setEditUserPersonalEmail] = useState('');
+  const [editUserPhone, setEditUserPhone] = useState('');
+  const [editUserRoleInCompany, setEditUserRoleInCompany] = useState('');
+  const [editUserAssignedClients, setEditUserAssignedClients] = useState<string[]>([]);
+  const [editUserSupervisingTKs, setEditUserSupervisingTKs] = useState<string[]>([]);
+  const [editUserError, setEditUserError] = useState('');
+
+  // --- Self-Profile Editing States (All Users) ---
+  const [isEditingSelfProfile, setIsEditingSelfProfile] = useState(false);
+  const [selfFullName, setSelfFullName] = useState('');
+  const [selfPhone, setSelfPhone] = useState('');
+  const [selfPersonalEmail, setSelfPersonalEmail] = useState('');
+  const [selfRoleInCompany, setSelfRoleInCompany] = useState('');
+  const [selfProfileError, setSelfProfileError] = useState('');
+  const [selfProfileSuccess, setSelfProfileSuccess] = useState('');
+
+  // --- Bootstrap Admin States ---
+  const [bootstrapAuthCode, setBootstrapAuthCode] = useState('');
+  const [showBootstrapPassword, setShowBootstrapPassword] = useState(false);
+  const [bootstrapConfirmPassword, setBootstrapConfirmPassword] = useState('');
+  const [showBootstrapConfirmPassword, setShowBootstrapConfirmPassword] = useState(false);
+
+  // --- Username Decryption & Copy States ---
+  const [decryptedUsernames, setDecryptedUsernames] = useState<Record<string, string>>({});
+  const [copiedUsernameId, setCopiedUsernameId] = useState<string | null>(null);
+
   // --- Navigation Tab ---
-  const [currentTab, setCurrentTab] = useState<'vaults' | 'clients' | 'users' | 'approvals' | 'generator' | 'audit' | 'profile'>('vaults');
+  const [currentTab, setCurrentTab] = useState<'dashboard' | 'vaults' | 'clients' | 'users' | 'approvals' | 'generator' | 'audit' | 'profile' | 'domains'>('dashboard');
 
   // --- Cloud & Local Data Stores ---
   const [clients, setClients] = useState<ClientProfile[]>(() => {
@@ -485,6 +559,28 @@ export default function App() {
     syncWithFirebaseCloud();
   }, []);
 
+  // Auto-decrypt encrypted usernames when vault DEK is active
+  useEffect(() => {
+    if (!isVaultUnlocked || !vaultDEK) return;
+    const allCreds = Object.values(platformCredentials).flat();
+    allCreds.forEach(async (cred) => {
+      if (cred.usernameCiphertext && cred.usernameNonce && !decryptedUsernames[cred.id]) {
+        try {
+          const res = await LokiCryptoService.decryptItem<{ username: string }>(
+            {
+              ciphertext: cred.usernameCiphertext,
+              nonce: cred.usernameNonce,
+              crypto_version: 'v1-xchacha20poly1305',
+              key_version: 1,
+            },
+            vaultDEK
+          );
+          setDecryptedUsernames((prev) => ({ ...prev, [cred.id]: res.username }));
+        } catch {}
+      }
+    });
+  }, [platformCredentials, isVaultUnlocked, vaultDEK]);
+
   // Filter clients and credentials based on current user's role and assignments (Section 4, 5, 15)
   const accessibleClients = useMemo(() => {
     if (!currentUser) return [];
@@ -627,40 +723,67 @@ export default function App() {
     setLoginError('');
     setLoginSuccess('');
 
+    // Check Account Lockout Rate Limiting
+    const currentLockout = parseInt(localStorage.getItem('loki_lockout_until') || '0', 10);
+    if (Date.now() < currentLockout) {
+      const remainingSec = Math.ceil((currentLockout - Date.now()) / 1000);
+      setLoginError(`Security Lockout Active: Too many failed login attempts. Please wait ${remainingSec} seconds before retrying.`);
+      return;
+    }
+
     if (!loginEmail || !loginPassword) {
       setLoginError('Email and password are required.');
       return;
     }
 
-    if (isRegisterMode) {
+    const emailNorm = loginEmail.trim().toLowerCase();
+
+    // RFC 5322 email syntax validation with hyphen support
+    const emailRegex = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
+    if (!emailRegex.test(emailNorm) || emailNorm.includes(' ') || (emailNorm.match(/@/g) || []).length !== 1) {
+      setLoginError('Invalid email structure. RFC 5322 compliance required.');
+      return;
+    }
+
+    // Allowed Domains whitelist enforcement
+    if (!isEmailDomainAllowed(emailNorm)) {
+      setLoginError(`Access restricted: Email domain is not authorized. Allowed domains: ${allowedDomains.join(', ')}`);
+      return;
+    }
+
+    const timekeeperCount = managedUsers.filter((u) => u.role === 'timekeeper').length;
+    const isBootstrappingTimekeeper = currentPath === '/timekeeper' && timekeeperCount === 0;
+
+    // --- TIMEKEEPER INITIAL BOOTSTRAP SETUP ---
+    if (isBootstrappingTimekeeper) {
       const pol = validatePasswordPolicy(loginPassword);
       if (!pol.valid) {
         setLoginError(pol.error || 'Password does not meet complexity requirements.');
         return;
       }
 
-      // Check if user already exists
-      if (managedUsers.some((u) => u.email.toLowerCase() === loginEmail.trim().toLowerCase())) {
-        setLoginError('A user with this email address already exists.');
+      if (bootstrapConfirmPassword && loginPassword !== bootstrapConfirmPassword) {
+        setLoginError('Password and Confirm Password do not match.');
         return;
       }
 
-      const isFirst = managedUsers.length === 0;
-      const initialRole: UserRole = isFirst ? 'timekeeper' : loginRole;
       const securePasswordHash = await hashUserPasswordClient(loginPassword);
+      const secureAuthCodeHash = bootstrapAuthCode.trim()
+        ? await hashUserPasswordClient(bootstrapAuthCode.trim())
+        : undefined;
 
       const newUserId = `user-${Date.now()}`;
       const newAuthUser: AuthUser = {
         id: newUserId,
-        email: loginEmail.trim().toLowerCase(),
-        fullName: loginFullName.trim() || 'New User',
-        role: initialRole,
+        email: emailNorm,
+        fullName: loginFullName.trim() || 'Master Timekeeper',
+        role: 'timekeeper',
         orgId: 'org-loki-primary',
         token: `jwt-${Date.now()}-${Math.random().toString(36).substring(2)}`,
-        companyEmail: loginEmail.trim().toLowerCase(),
+        companyEmail: emailNorm,
         personalEmail: '',
         phoneNumber: '',
-        roleInCompany: initialRole === 'timekeeper' ? 'Administrator' : 'Agency Specialist',
+        roleInCompany: 'Master Administrator',
         assignedClients: [],
         assignedPlatforms: {},
         supervisingTimekeepers: [],
@@ -670,7 +793,7 @@ export default function App() {
         id: newAuthUser.id,
         email: newAuthUser.email,
         fullName: newAuthUser.fullName,
-        role: newAuthUser.role,
+        role: 'timekeeper',
         isActive: true,
         companyEmail: newAuthUser.companyEmail,
         personalEmail: '',
@@ -682,10 +805,17 @@ export default function App() {
         passwordHash: securePasswordHash,
         passwordHistory: [],
         lastPasswordChangedAt: undefined,
+        authCodeHash: secureAuthCodeHash,
       };
 
       setManagedUsers((prev) => [...prev, newManaged]);
       saveSession(newAuthUser);
+
+      // Reset any failed attempts
+      localStorage.removeItem('loki_failed_logins');
+      localStorage.removeItem('loki_lockout_until');
+      setFailedLoginAttempts(0);
+      setLockoutUntil(0);
 
       // Save to Firebase Cloud
       try {
@@ -704,7 +834,7 @@ export default function App() {
         console.warn('Firebase sync warning:', err);
       }
 
-      // Unlock vault crypto & persist DEK to active tab session
+      // Unlock vault crypto
       const salt = await LokiCryptoService.generateSalt();
       await LokiCryptoService.deriveKEK(loginPassword, salt);
       const dek = await LokiCryptoService.generateVaultDEK();
@@ -716,17 +846,32 @@ export default function App() {
         sessionStorage.setItem('loki_tab_vault_dek', btoa(binary));
       } catch {}
 
-      recordAudit('USER_REGISTERED', `Registered new account ${newAuthUser.email} with role: ${newAuthUser.role}`);
-      setLoginSuccess('Account successfully created.');
-      navigateTo(`/${newAuthUser.role}`);
+      recordAudit('TIMEKEEPER_BOOTSTRAP', `Bootstrapped master Timekeeper account: ${newAuthUser.email}`);
+      setLoginSuccess('Master Timekeeper account created successfully.');
+      navigateTo('/timekeeper');
       return;
     }
 
-    // Login verification
-    const found = managedUsers.find((u) => u.email.toLowerCase() === loginEmail.trim().toLowerCase());
+    // --- NORMAL AUTHENTICATION FLOW ---
+    const recordFailedAttempt = () => {
+      const attempts = parseInt(localStorage.getItem('loki_failed_logins') || '0', 10) + 1;
+      localStorage.setItem('loki_failed_logins', attempts.toString());
+      setFailedLoginAttempts(attempts);
+
+      if (attempts >= 5) {
+        const lockTime = Date.now() + 5 * 60 * 1000; // 5 minute lockout
+        localStorage.setItem('loki_lockout_until', lockTime.toString());
+        setLockoutUntil(lockTime);
+        setLoginError('Security Alert: 5 failed login attempts reached. Your session is locked out for 5 minutes.');
+      } else {
+        setLoginError(`Invalid email or password credentials. Attempt ${attempts} of 5 before lockout.`);
+      }
+    };
+
+    const found = managedUsers.find((u) => u.email.toLowerCase() === emailNorm);
 
     if (!found) {
-      setLoginError('Invalid email or password credentials. Contact your Timekeeper.');
+      recordFailedAttempt();
       return;
     }
 
@@ -749,12 +894,18 @@ export default function App() {
       return;
     }
 
-    // Cryptographic password verification (Section 16 & 17) - Zero hardcoded plaintext bypass
+    // Cryptographic password verification (PBKDF2 SHA-512)
     const isPasswordValid = await verifyUserPasswordClient(loginPassword, found.passwordHash);
     if (!isPasswordValid) {
-      setLoginError('Invalid password credentials.');
+      recordFailedAttempt();
       return;
     }
+
+    // Successful login: reset failed login attempts
+    localStorage.removeItem('loki_failed_logins');
+    localStorage.removeItem('loki_lockout_until');
+    setFailedLoginAttempts(0);
+    setLockoutUntil(0);
 
     // Transparently upgrade legacy unhashed record if needed
     if (found.passwordHash && !found.passwordHash.startsWith('$pbkdf2$')) {
@@ -894,6 +1045,15 @@ export default function App() {
     }
 
     const activeDek = await getOrInitVaultDEK();
+
+    let usernameCiphertext: string | undefined = undefined;
+    let usernameNonce: string | undefined = undefined;
+    if (newUsername.trim()) {
+      const encUser = await LokiCryptoService.encryptItem({ username: newUsername.trim() }, activeDek);
+      usernameCiphertext = encUser.ciphertext;
+      usernameNonce = encUser.nonce;
+    }
+
     const encrypted = await LokiCryptoService.encryptItem({ password: newPassword }, activeDek);
     const ciphertext = encrypted.ciphertext;
     const nonce = encrypted.nonce;
@@ -903,7 +1063,8 @@ export default function App() {
       clientId: activeClient.id,
       platformName: platform,
       keyLabel: newKeyLabel.trim(),
-      usernameCiphertext: newUsername.trim(),
+      usernameCiphertext,
+      usernameNonce,
       passwordCiphertext: ciphertext,
       passwordNonce: nonce,
       url: newUrl.trim(),
@@ -912,6 +1073,9 @@ export default function App() {
     };
 
     setDecryptedPasswords((prev) => ({ ...prev, [newCred.id]: newPassword }));
+    if (newUsername.trim()) {
+      setDecryptedUsernames((prev) => ({ ...prev, [newCred.id]: newUsername.trim() }));
+    }
 
     setPlatformCredentials((prev) => {
       const clientCreds = prev[activeClient.id] || [];
@@ -942,6 +1106,37 @@ export default function App() {
     setShowNewPassword(false);
     setShowConfirmPassword(false);
     setNewUrl('');
+  };
+
+  const handleGetDecryptedUsername = async (cred: PlatformCredential): Promise<string> => {
+    if (!cred.usernameCiphertext) return '';
+    if (!cred.usernameNonce) return cred.usernameCiphertext;
+    if (decryptedUsernames[cred.id]) return decryptedUsernames[cred.id];
+
+    try {
+      const activeDek = await getOrInitVaultDEK();
+      const res = await LokiCryptoService.decryptItem<{ username: string }>(
+        {
+          ciphertext: cred.usernameCiphertext,
+          nonce: cred.usernameNonce,
+          crypto_version: 'v1-xchacha20poly1305',
+          key_version: 1,
+        },
+        activeDek
+      );
+      setDecryptedUsernames((prev) => ({ ...prev, [cred.id]: res.username }));
+      return res.username;
+    } catch {
+      return cred.usernameCiphertext;
+    }
+  };
+
+  const handleCopyUsername = async (cred: PlatformCredential) => {
+    const usernameText = await handleGetDecryptedUsername(cred);
+    if (!usernameText) return;
+    navigator.clipboard.writeText(usernameText);
+    setCopiedUsernameId(cred.id);
+    setTimeout(() => setCopiedUsernameId(null), 2000);
   };
 
   // --- Password Edit & Old Password Verification (Section 7) ---
@@ -1342,13 +1537,25 @@ export default function App() {
       return;
     }
 
+    const emailNorm = newUserEmail.trim().toLowerCase();
+    const emailRegex = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
+    if (!emailRegex.test(emailNorm) || emailNorm.includes(' ') || (emailNorm.match(/@/g) || []).length !== 1) {
+      setAddUserError('Invalid email structure. RFC 5322 compliance required.');
+      return;
+    }
+
+    if (!isEmailDomainAllowed(emailNorm)) {
+      setAddUserError(`Domain restricted: Email must match an authorized domain (${allowedDomains.join(', ')}).`);
+      return;
+    }
+
     const pol = validatePasswordPolicy(newUserPassword);
     if (!pol.valid) {
       setAddUserError(pol.error || 'Password does not meet complexity requirements.');
       return;
     }
 
-    if (managedUsers.some((u) => u.email.toLowerCase() === newUserEmail.trim().toLowerCase())) {
+    if (managedUsers.some((u) => u.email.toLowerCase() === emailNorm)) {
       setAddUserError('A user with this email address already exists.');
       return;
     }
@@ -1584,6 +1791,251 @@ export default function App() {
     }, 1200);
   };
 
+  // --- Admin User Permissions Editing (Section 11 & User Governance) ---
+  const handleOpenEditUser = (u: ManagedUser) => {
+    setEditingUser(u);
+    setEditUserFullName(u.fullName);
+    setEditUserRole(u.role);
+    setEditUserCompanyEmail(u.companyEmail || u.email);
+    setEditUserPersonalEmail(u.personalEmail || '');
+    setEditUserPhone(u.phoneNumber || '');
+    setEditUserRoleInCompany(u.roleInCompany || '');
+    setEditUserAssignedClients(u.assignedClients || []);
+    setEditUserSupervisingTKs(u.supervisingTimekeepers || []);
+    setEditUserError('');
+    setShowEditUserModal(true);
+  };
+
+  const handleSaveEditUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingUser) return;
+    setEditUserError('');
+
+    if (!editUserFullName.trim()) {
+      setEditUserError('Full name is required.');
+      return;
+    }
+
+    if (editUserRole === 'agent') {
+      if (editUserSupervisingTKs.length > 3) {
+        setEditUserError('Agents can have a maximum of 3 supervising Timekeepers.');
+        return;
+      }
+    }
+
+    const updatedUser: ManagedUser = {
+      ...editingUser,
+      fullName: editUserFullName.trim(),
+      role: editUserRole,
+      companyEmail: editUserCompanyEmail.trim() || editingUser.email,
+      personalEmail: editUserPersonalEmail.trim(),
+      phoneNumber: editUserPhone.trim(),
+      roleInCompany: editUserRoleInCompany.trim(),
+      assignedClients: editUserRole === 'timekeeper' ? [] : editUserAssignedClients,
+      supervisingTimekeepers: editUserRole === 'agent' ? editUserSupervisingTKs : [],
+    };
+
+    setManagedUsers((prev) => prev.map((u) => (u.id === editingUser.id ? updatedUser : u)));
+
+    // Update session if editing self
+    if (currentUser && currentUser.id === editingUser.id) {
+      const updatedCurrent: AuthUser = {
+        ...currentUser,
+        fullName: updatedUser.fullName,
+        role: updatedUser.role,
+        companyEmail: updatedUser.companyEmail,
+        personalEmail: updatedUser.personalEmail,
+        phoneNumber: updatedUser.phoneNumber,
+        roleInCompany: updatedUser.roleInCompany,
+        assignedClients: updatedUser.assignedClients,
+        supervisingTimekeepers: updatedUser.supervisingTimekeepers,
+      };
+      saveSession(updatedCurrent);
+    }
+
+    try {
+      await LokiFirebaseService.saveUserProfile({
+        id: updatedUser.id,
+        email: updatedUser.email,
+        fullName: updatedUser.fullName,
+        role: updatedUser.role,
+        isActive: updatedUser.isActive,
+        companyEmail: updatedUser.companyEmail,
+        personalEmail: updatedUser.personalEmail,
+        phoneNumber: updatedUser.phoneNumber,
+        roleInCompany: updatedUser.roleInCompany,
+        assignedClients: updatedUser.assignedClients,
+        supervisingTimekeepers: updatedUser.supervisingTimekeepers,
+        createdByTimekeeperId: updatedUser.createdByTimekeeperId,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      console.warn('Error saving updated user profile:', err);
+    }
+
+    recordAudit('USER_PERMISSIONS_UPDATED', `Timekeeper updated permissions for user ${updatedUser.email} (${updatedUser.role})`);
+    setShowEditUserModal(false);
+    setEditingUser(null);
+  };
+
+  // --- Self-Profile Editing (All Users) ---
+  const handleStartEditSelfProfile = () => {
+    if (!currentUser) return;
+    setSelfFullName(currentUser.fullName);
+    setSelfPhone(currentUser.phoneNumber || '');
+    setSelfPersonalEmail(currentUser.personalEmail || '');
+    setSelfRoleInCompany(currentUser.roleInCompany || '');
+    setSelfProfileError('');
+    setSelfProfileSuccess('');
+    setIsEditingSelfProfile(true);
+  };
+
+  const handleSaveSelfProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!currentUser) return;
+    setSelfProfileError('');
+    setSelfProfileSuccess('');
+
+    if (!selfFullName.trim()) {
+      setSelfProfileError('Full name is required.');
+      return;
+    }
+
+    const updatedUser: AuthUser = {
+      ...currentUser,
+      fullName: selfFullName.trim(),
+      personalEmail: selfPersonalEmail.trim(),
+      phoneNumber: selfPhone.trim(),
+      roleInCompany: selfRoleInCompany.trim(),
+    };
+
+    saveSession(updatedUser);
+
+    setManagedUsers((prev) =>
+      prev.map((u) =>
+        u.id === currentUser.id
+          ? {
+              ...u,
+              fullName: updatedUser.fullName,
+              personalEmail: updatedUser.personalEmail,
+              phoneNumber: updatedUser.phoneNumber,
+              roleInCompany: updatedUser.roleInCompany,
+            }
+          : u
+      )
+    );
+
+    try {
+      await LokiFirebaseService.saveUserProfile({
+        id: currentUser.id,
+        email: currentUser.email,
+        fullName: updatedUser.fullName,
+        role: currentUser.role,
+        isActive: true,
+        personalEmail: updatedUser.personalEmail,
+        phoneNumber: updatedUser.phoneNumber,
+        roleInCompany: updatedUser.roleInCompany,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      console.warn('Self profile cloud sync:', err);
+    }
+
+    recordAudit('USER_PROFILE_UPDATED', `User ${currentUser.email} updated personal profile`);
+    setSelfProfileSuccess('Profile updated successfully!');
+    setIsEditingSelfProfile(false);
+  };
+
+  // --- Allowed Domains Management (Timekeeper Only) ---
+  const handleAddDomain = (e: React.FormEvent) => {
+    e.preventDefault();
+    let d = newDomainInput.trim().toLowerCase();
+    if (!d) return;
+    if (!d.startsWith('@')) d = `@${d}`;
+    if (!/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(d.slice(1))) {
+      alert('Please enter a valid domain format (e.g., @company.com)');
+      return;
+    }
+    if (allowedDomains.includes(d)) {
+      alert('Domain already exists in whitelist.');
+      return;
+    }
+    const updated = [...allowedDomains, d];
+    setAllowedDomains(updated);
+    localStorage.setItem('loki_allowed_domains', JSON.stringify(updated));
+    recordAudit('DOMAIN_ADDED', `Timekeeper added allowed email domain: ${d}`);
+    setNewDomainInput('');
+    setShowAddDomainModal(false);
+  };
+
+  const handleOpenEditDomain = (dom: string) => {
+    setEditingDomainOld(dom);
+    setEditingDomainNew(dom);
+    setShowEditDomainModal(true);
+  };
+
+  const handleSaveEditDomain = (e: React.FormEvent) => {
+    e.preventDefault();
+    let d = editingDomainNew.trim().toLowerCase();
+    if (!d) return;
+    if (!d.startsWith('@')) d = `@${d}`;
+    if (!/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(d.slice(1))) {
+      alert('Please enter a valid domain format (e.g., @company.com)');
+      return;
+    }
+    const updated = allowedDomains.map((item) => (item === editingDomainOld ? d : item));
+    setAllowedDomains(updated);
+    localStorage.setItem('loki_allowed_domains', JSON.stringify(updated));
+    recordAudit('DOMAIN_UPDATED', `Timekeeper updated allowed domain from ${editingDomainOld} to ${d}`);
+    setShowEditDomainModal(false);
+  };
+
+  const handleRemoveDomain = (dom: string) => {
+    if (allowedDomains.length <= 1) {
+      alert('Security restriction: Cannot remove the last remaining allowed domain.');
+      return;
+    }
+    if (!window.confirm(`Are you sure you want to remove allowed domain "${dom}"? Users with this domain will no longer be able to log in.`)) {
+      return;
+    }
+    const updated = allowedDomains.filter((d) => d !== dom);
+    setAllowedDomains(updated);
+    localStorage.setItem('loki_allowed_domains', JSON.stringify(updated));
+    recordAudit('DOMAIN_REMOVED', `Timekeeper removed allowed domain: ${dom}`);
+  };
+
+  // --- Clean Slate User Database Reset ---
+  const handleCleanResetUsers = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setCleanResetError('');
+    if (cleanResetConfirmText !== 'RESET USERS') {
+      setCleanResetError('Please type "RESET USERS" exactly to confirm.');
+      return;
+    }
+
+    setManagedUsers([]);
+    localStorage.removeItem('loki_managed_users');
+    localStorage.removeItem('loki_session');
+    localStorage.removeItem('loki_failed_logins');
+    localStorage.removeItem('loki_lockout_until');
+    setFailedLoginAttempts(0);
+    setLockoutUntil(0);
+
+    try {
+      await fetch('/api/admin/reset-users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+    } catch {}
+
+    recordAudit('DATABASE_RESET', 'Administrator reset user database to clean slate. Allowed domains and clients preserved.');
+    setShowCleanResetModal(false);
+    setCleanResetConfirmText('');
+    setCurrentUser(null);
+    navigateTo('/timekeeper');
+    alert('User database successfully reset to clean slate. Allowed email domains (@gmail.com, @mybusinessmate.ai) and clients are preserved. You can now bootstrap the master Timekeeper account.');
+  };
+
   // --- ROUTE GUARD & 404 NOT FOUND (Section 35 & 36) ---
   const isTimekeeperRoute = currentPath === '/timekeeper' || currentPath.startsWith('/timekeeper/') || currentPath === '/project/timekeeper';
   const isAgentRoute = currentPath === '/agent' || currentPath.startsWith('/agent/') || currentPath === '/project/agent';
@@ -1626,6 +2078,8 @@ export default function App() {
     const isDedicatedTK = currentPath === '/timekeeper' || currentPath.startsWith('/timekeeper');
     const isDedicatedAgent = currentPath === '/agent' || currentPath.startsWith('/agent');
     const isDedicatedVariant = currentPath === '/variant' || currentPath.startsWith('/variant');
+    const timekeeperCount = managedUsers.filter((u) => u.role === 'timekeeper').length;
+    const isBootstrapTK = isDedicatedTK && timekeeperCount === 0;
 
     return (
       <div className="min-h-screen bg-[#080A09] text-[#E9E8DF] flex flex-col justify-center items-center p-4 sm:p-6 selection:bg-[#3FAF63]/30 font-sans">
@@ -1641,7 +2095,9 @@ export default function App() {
               )}
             </div>
             <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-[#E9E8DF]">
-              {isDedicatedTK
+              {isBootstrapTK
+                ? 'Timekeeper Initial Setup'
+                : isDedicatedTK
                 ? 'Timekeeper Portal'
                 : isDedicatedAgent
                 ? 'Agent Vault Access'
@@ -1650,11 +2106,28 @@ export default function App() {
                 : 'Agency Credential Manager'}
             </h1>
             <p className="text-xs text-[#A5AAA1] flex items-center justify-center space-x-1.5">
-              <span>{isDedicatedTK ? 'Administrative Control Center' : 'Encrypted Client Secret Vault'}</span>
+              <span>
+                {isBootstrapTK
+                  ? 'Bootstrap Primary Administrative Account'
+                  : isDedicatedTK
+                  ? 'Administrative Control Center'
+                  : 'Encrypted Client Secret Vault'}
+              </span>
               <span className="text-[#3FAF63] flex items-center">
                 <Cloud className="w-3.5 h-3.5 ml-1 inline" />
               </span>
             </p>
+
+            {/* Allowed Email Domains Badge */}
+            <div className="pt-1">
+              <div className="inline-flex items-center space-x-1.5 text-[10px] text-[#A5AAA1] bg-[#0E1210] border border-[#252B26] py-1 px-3 rounded-full">
+                <Globe className="w-3 h-3 text-[#3FAF63] shrink-0" />
+                <span>
+                  Allowed Domains:{' '}
+                  <strong className="text-[#75F09A]">{allowedDomains.join(', ')}</strong>
+                </span>
+              </div>
+            </div>
           </div>
 
           {loginError && (
@@ -1672,9 +2145,10 @@ export default function App() {
           )}
 
           <form onSubmit={handleAuthSubmit} className="space-y-4 text-xs">
-            {isRegisterMode && (
+            {/* If Bootstrapping Timekeeper: Display Full Name */}
+            {isBootstrapTK && (
               <div>
-                <label className="text-[#A5AAA1] block mb-1 uppercase tracking-wider text-[11px] font-medium">Full Name</label>
+                <label className="text-[#A5AAA1] block mb-1 uppercase tracking-wider text-[11px] font-medium">Master Admin Name *</label>
                 <input
                   type="text"
                   required
@@ -1687,11 +2161,11 @@ export default function App() {
             )}
 
             <div>
-              <label className="text-[#A5AAA1] block mb-1 uppercase tracking-wider text-[11px] font-medium">Email Address</label>
+              <label className="text-[#A5AAA1] block mb-1 uppercase tracking-wider text-[11px] font-medium">Email Address *</label>
               <input
                 type="email"
                 required
-                placeholder={isDedicatedTK ? 'timekeeper@agency.com' : 'user@agency.com'}
+                placeholder={isDedicatedTK ? 'admin@mybusinessmate.ai' : 'user@mybusinessmate.ai'}
                 value={loginEmail}
                 onChange={(e) => setLoginEmail(e.target.value)}
                 className="w-full px-3.5 py-2.5 bg-[#0C100E] border border-[#34372D] focus:border-[#3FAF63] rounded-lg text-sm text-[#E9E8DF] outline-none transition-all placeholder:text-[#6F766E]"
@@ -1699,7 +2173,7 @@ export default function App() {
             </div>
 
             <div>
-              <label className="text-[#A5AAA1] block mb-1 uppercase tracking-wider text-[11px] font-medium">Password</label>
+              <label className="text-[#A5AAA1] block mb-1 uppercase tracking-wider text-[11px] font-medium">Password *</label>
               <div className="relative">
                 <input
                   type={showLoginPassword ? 'text' : 'password'}
@@ -1719,51 +2193,62 @@ export default function App() {
               </div>
             </div>
 
-            {isRegisterMode && (
-              <div>
-                <label className="text-[#A5AAA1] block mb-1 uppercase tracking-wider text-[11px] font-medium">Canonical Role</label>
-                <select
-                  value={loginRole}
-                  onChange={(e) => setLoginRole(e.target.value as UserRole)}
-                  className="w-full px-3 py-2 bg-[#0C100E] border border-[#34372D] focus:border-[#3FAF63] rounded-lg text-[#E9E8DF] outline-none"
-                >
-                  <option value="timekeeper">Timekeeper (Admin)</option>
-                  <option value="agent">Agent (Manager)</option>
-                  <option value="variant">Variant (Viewer)</option>
-                </select>
-              </div>
+            {/* Bootstrap Timekeeper: Confirm Password & Auth Code */}
+            {isBootstrapTK && (
+              <>
+                <div>
+                  <label className="text-[#A5AAA1] block mb-1 uppercase tracking-wider text-[11px] font-medium">Confirm Password *</label>
+                  <div className="relative">
+                    <input
+                      type={showBootstrapConfirmPassword ? 'text' : 'password'}
+                      required
+                      placeholder="Repeat password..."
+                      value={bootstrapConfirmPassword}
+                      onChange={(e) => setBootstrapConfirmPassword(e.target.value)}
+                      className="w-full pl-3.5 pr-10 py-2.5 bg-[#0C100E] border border-[#34372D] focus:border-[#3FAF63] rounded-lg text-sm text-[#E9E8DF] outline-none transition-all placeholder:text-[#6F766E]"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowBootstrapConfirmPassword(!showBootstrapConfirmPassword)}
+                      className="absolute right-3 top-3 text-[#A5AAA1] hover:text-[#E9E8DF]"
+                    >
+                      {showBootstrapConfirmPassword ? <EyeOff className="w-4 h-4 text-[#C9A84E]" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-[#C9A84E] block mb-1 uppercase tracking-wider text-[11px] font-semibold">
+                    Admin Authorization Code (Optional)
+                  </label>
+                  <input
+                    type="password"
+                    placeholder="Enter 6-8 digit code for agent approvals..."
+                    value={bootstrapAuthCode}
+                    onChange={(e) => setBootstrapAuthCode(e.target.value)}
+                    className="w-full px-3.5 py-2.5 bg-[#0C100E] border border-[#34372D] focus:border-[#C9A84E] rounded-lg text-sm text-[#E9E8DF] outline-none transition-all placeholder:text-[#6F766E]"
+                  />
+                  <span className="text-[10px] text-[#6F766E] mt-1 block">
+                    Used to authorize instant credential deletions submitted by supervised agents.
+                  </span>
+                </div>
+              </>
             )}
 
             <button
               type="submit"
               className="w-full py-3 bg-[#3FAF63] hover:bg-[#52C978] active:bg-[#328D50] text-[#071009] rounded-lg text-xs font-bold uppercase tracking-wider transition-all shadow-[0_0_20px_rgba(63,175,99,0.15)] mt-2"
             >
-              {isRegisterMode ? 'Register Account' : isDedicatedTK ? 'Authenticate Timekeeper' : 'Login to Vault'}
+              {isBootstrapTK
+                ? 'Create Master Timekeeper'
+                : isDedicatedTK
+                ? 'Authenticate Timekeeper'
+                : 'Login to Vault'}
             </button>
-
-            {!isRegisterMode && managedUsers.length === 0 && (
-              <div className="bg-[#102719] border border-[#45C46B]/40 text-[#75F09A] p-3 rounded-lg text-xs space-y-1">
-                <div className="font-semibold flex items-center space-x-1.5">
-                  <ShieldCheck className="w-4 h-4" />
-                  <span>First-Time Setup</span>
-                </div>
-                <p className="text-[11px] text-[#A5AAA1]">
-                  No administrative account exists yet. Click "Setup first Timekeeper Account" below to create your master account.
-                </p>
-              </div>
-            )}
           </form>
 
           <div className="pt-2 border-t border-[#252B26] flex items-center justify-between text-[11px] text-[#A5AAA1]">
-            <button
-              onClick={() => {
-                setIsRegisterMode(!isRegisterMode);
-                setLoginError('');
-              }}
-              className="hover:text-[#75F09A] transition-colors"
-            >
-              {isRegisterMode ? 'Already registered? Sign In' : 'Setup first Timekeeper Account'}
-            </button>
+            <span className="text-[#6F766E]">Loki Agency Vault v2.0</span>
             <button
               onClick={() => {
                 if (isDedicatedTK) navigateTo('/');
@@ -1817,6 +2302,21 @@ export default function App() {
           {/* Navigation Items */}
           <nav className="space-y-1">
             <button
+              onClick={() => setCurrentTab('dashboard')}
+              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-xs transition-all ${
+                currentTab === 'dashboard'
+                  ? 'bg-[rgba(63,175,99,0.10)] text-[#75F09A] font-semibold border-l-2 border-[#3FAF63]'
+                  : 'text-[#A5AAA1] hover:text-[#E9E8DF] hover:bg-[#171D18]'
+              }`}
+            >
+              <div className="flex items-center space-x-3">
+                <BarChart3 className="w-4 h-4 text-[#3FAF63]" />
+                <span>Executive Overview</span>
+              </div>
+              {currentTab === 'dashboard' && <div className="w-1.5 h-1.5 rounded-full bg-[#3FAF63]" />}
+            </button>
+
+            <button
               onClick={() => setCurrentTab('vaults')}
               className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-xs transition-all ${
                 currentTab === 'vaults'
@@ -1864,6 +2364,27 @@ export default function App() {
                 {managedUsers.length > 0 && (
                   <span className="text-[10px] px-1.5 py-0.2 bg-[#171D18] rounded text-[#A5AAA1]">
                     {managedUsers.length}
+                  </span>
+                )}
+              </button>
+            )}
+
+            {isTimekeeper && (
+              <button
+                onClick={() => setCurrentTab('domains')}
+                className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-xs transition-all ${
+                  currentTab === 'domains'
+                    ? 'bg-[rgba(63,175,99,0.10)] text-[#75F09A] font-semibold border-l-2 border-[#3FAF63]'
+                    : 'text-[#A5AAA1] hover:text-[#E9E8DF] hover:bg-[#171D18]'
+                }`}
+              >
+                <div className="flex items-center space-x-3">
+                  <Globe className="w-4 h-4 text-[#75F09A]" />
+                  <span>Domain Authentication</span>
+                </div>
+                {allowedDomains.length > 0 && (
+                  <span className="text-[10px] px-1.5 py-0.2 bg-[#171D18] rounded text-[#75F09A] border border-[#34372D]">
+                    {allowedDomains.length}
                   </span>
                 )}
               </button>
@@ -1988,6 +2509,16 @@ export default function App() {
               <nav className="space-y-1 text-xs">
                 <button
                   onClick={() => {
+                    setCurrentTab('dashboard');
+                    setMobileMenuOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-2.5 rounded-lg text-[#E9E8DF] hover:bg-[#171D18] flex items-center space-x-2"
+                >
+                  <BarChart3 className="w-4 h-4 text-[#3FAF63]" />
+                  <span>Executive Overview</span>
+                </button>
+                <button
+                  onClick={() => {
                     setCurrentTab('vaults');
                     setMobileMenuOpen(false);
                   }}
@@ -2015,6 +2546,20 @@ export default function App() {
                     className="w-full text-left px-3 py-2.5 rounded-lg text-[#E9E8DF] hover:bg-[#171D18]"
                   >
                     User Management
+                  </button>
+                )}
+                {isTimekeeper && (
+                  <button
+                    onClick={() => {
+                      setCurrentTab('domains');
+                      setMobileMenuOpen(false);
+                    }}
+                    className="w-full text-left px-3 py-2.5 rounded-lg text-[#E9E8DF] hover:bg-[#171D18] flex items-center justify-between"
+                  >
+                    <span>Domain Authentication</span>
+                    <span className="text-[10px] px-1.5 py-0.2 bg-[#171D18] rounded text-[#75F09A]">
+                      {allowedDomains.length}
+                    </span>
                   </button>
                 )}
                 {isTimekeeper && (
@@ -2144,6 +2689,255 @@ export default function App() {
 
         {/* Dynamic Tab Body */}
         <div className="flex-1 overflow-y-auto p-4 sm:p-6 md:p-8 max-w-6xl w-full mx-auto relative z-10">
+          {/* TAB 0: EXECUTIVE OVERVIEW DASHBOARD */}
+          {currentTab === 'dashboard' && (() => {
+            const allCredsList = Object.values(platformCredentials).flat();
+            const totalClientsCount = clients.length;
+            const totalCredsCount = allCredsList.length;
+
+            let strongCount = 0;
+            let moderateCount = 0;
+            for (const c of allCredsList) {
+              const plain = decryptedPasswords[c.id];
+              if (plain) {
+                if (plain.length >= 16) strongCount++;
+                else moderateCount++;
+              } else {
+                strongCount++;
+              }
+            }
+
+            const counts: Record<string, number> = {};
+            for (const c of allCredsList) {
+              counts[c.platformName] = (counts[c.platformName] || 0) + 1;
+            }
+            const platformStats = Object.entries(counts)
+              .map(([name, count]) => ({ name, count }))
+              .sort((a, b) => b.count - a.count);
+
+            const displayedPlatforms = showAllPlatforms ? platformStats : platformStats.slice(0, 5);
+            const pendingDeletionsCount = deletionRequests.filter((r) => r.status === 'pending').length;
+            const pendingOverridesCount = overrideRequests.filter((r) => r.status === 'pending').length;
+
+            return (
+              <div className="space-y-8">
+                {/* Header */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-[#252B26] gap-3">
+                  <div>
+                    <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-[#E9E8DF]">
+                      {isTimekeeper ? 'Timekeeper Executive Overview' : 'Agency Vault Overview'}
+                    </h1>
+                    <p className="text-xs text-[#A5AAA1] mt-0.5">
+                      Encrypted client secret metrics, password health assessment, and platform breakdown
+                    </p>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    {isTimekeeper && (
+                      <button
+                        onClick={() => setShowAddClientModal(true)}
+                        className="px-3 py-1.5 bg-[#171D18] hover:bg-[#1F2620] border border-[#34372D] text-[#E9E8DF] rounded-lg text-xs font-medium flex items-center space-x-1.5 transition-colors"
+                      >
+                        <Plus className="w-3.5 h-3.5 text-[#3FAF63]" />
+                        <span>Add Client</span>
+                      </button>
+                    )}
+                    {(isTimekeeper || isAgent) && activeClient && (
+                      <button
+                        onClick={() => setShowAddCredModal(true)}
+                        className="px-3 py-1.5 bg-[#3FAF63] hover:bg-[#52C978] text-[#071009] rounded-lg text-xs font-semibold flex items-center space-x-1.5 shadow-[0_0_15px_rgba(63,175,99,0.15)] transition-all"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>New Secret</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* KPI Cards Grid */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  <div className="bg-[#101412] border border-[#252B26] p-4 rounded-xl space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] uppercase tracking-wider text-[#A5AAA1] font-medium">Organizations</span>
+                      <Building className="w-4 h-4 text-[#3FAF63]" />
+                    </div>
+                    <div className="text-2xl font-bold text-[#E9E8DF]">{totalClientsCount}</div>
+                    <div className="text-[11px] text-[#6F766E] flex items-center justify-between">
+                      <span>Total Active Clients</span>
+                      <span className="text-[#75F09A]">Isolated</span>
+                    </div>
+                  </div>
+
+                  <div className="bg-[#101412] border border-[#252B26] p-4 rounded-xl space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] uppercase tracking-wider text-[#A5AAA1] font-medium">Platform Secrets</span>
+                      <Key className="w-4 h-4 text-[#45C46B]" />
+                    </div>
+                    <div className="text-2xl font-bold text-[#E9E8DF]">{totalCredsCount}</div>
+                    <div className="text-[11px] text-[#6F766E] flex items-center justify-between">
+                      <span>XChaCha20-Poly1305</span>
+                      <span className="text-[#45C46B]">256-bit AEAD</span>
+                    </div>
+                  </div>
+
+                  <div className="bg-[#101412] border border-[#252B26] p-4 rounded-xl space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] uppercase tracking-wider text-[#A5AAA1] font-medium">Password Health</span>
+                      <ShieldCheck className="w-4 h-4 text-[#75F09A]" />
+                    </div>
+                    <div className="flex items-baseline space-x-2">
+                      <span className="text-2xl font-bold text-[#75F09A]">{strongCount}</span>
+                      <span className="text-xs text-[#A5AAA1]">strong</span>
+                      {moderateCount > 0 && (
+                        <span className="text-xs text-[#C9A84E]">({moderateCount} moderate)</span>
+                      )}
+                    </div>
+                    <div className="text-[11px] text-[#6F766E]">
+                      Enforcing 8-30 char Aa1! entropy
+                    </div>
+                  </div>
+
+                  <div className="bg-[#101412] border border-[#252B26] p-4 rounded-xl space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] uppercase tracking-wider text-[#A5AAA1] font-medium">
+                        {isTimekeeper ? 'Pending Reviews' : 'My Assignments'}
+                      </span>
+                      {isTimekeeper ? (
+                        <AlertTriangle className="w-4 h-4 text-[#C9A84E]" />
+                      ) : (
+                        <Layers className="w-4 h-4 text-[#3FAF63]" />
+                      )}
+                    </div>
+                    <div className="text-2xl font-bold text-[#E9E8DF]">
+                      {isTimekeeper ? pendingDeletionsCount + pendingOverridesCount : accessibleClients.length}
+                    </div>
+                    <div className="text-[11px] text-[#6F766E]">
+                      {isTimekeeper
+                        ? `${pendingDeletionsCount} deletion(s), ${pendingOverridesCount} override(s)`
+                        : `${accessibleClients.length} client organization(s) accessible`}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Platform Distribution Breakdown */}
+                <div className="bg-[#101412] border border-[#252B26] rounded-xl p-5 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h3 className="text-sm font-bold text-[#E9E8DF]">Platform Distribution Breakdown</h3>
+                      <p className="text-[11px] text-[#A5AAA1] mt-0.5">
+                        Dynamic grouping of stored credentials across all client platform endpoints
+                      </p>
+                    </div>
+                    {platformStats.length > 5 && (
+                      <button
+                        onClick={() => setShowAllPlatforms(!showAllPlatforms)}
+                        className="text-xs text-[#75F09A] hover:underline flex items-center space-x-1 font-medium"
+                      >
+                        <span>{showAllPlatforms ? 'Show Less' : `Show More (${platformStats.length - 5} more)`}</span>
+                        {showAllPlatforms ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                      </button>
+                    )}
+                  </div>
+
+                  {platformStats.length === 0 ? (
+                    <div className="p-8 text-center text-xs text-[#6F766E] border border-dashed border-[#252B26] rounded-lg">
+                      No platform credentials registered yet across any clients.
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
+                      {displayedPlatforms.map((p) => {
+                        const pct = totalCredsCount > 0 ? Math.round((p.count / totalCredsCount) * 100) : 0;
+                        return (
+                          <div
+                            key={p.name}
+                            className="bg-[#0A0E0C] border border-[#1F2620] hover:border-[#34372D] rounded-lg p-3 space-y-2 transition-all"
+                          >
+                            <div className="flex items-center space-x-2">
+                              <PlatformIcon platformName={p.name} className="w-4 h-4" />
+                              <span className="text-xs font-semibold text-[#E9E8DF] truncate">{p.name}</span>
+                            </div>
+                            <div className="flex items-baseline justify-between">
+                              <span className="text-lg font-bold text-[#75F09A]">{p.count}</span>
+                              <span className="text-[10px] text-[#6F766E]">{pct}%</span>
+                            </div>
+                            <div className="w-full bg-[#171D18] h-1.5 rounded-full overflow-hidden">
+                              <div
+                                className="bg-[#3FAF63] h-full rounded-full transition-all duration-500"
+                                style={{ width: `${Math.max(pct, 5)}%` }}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {/* Client Matrix Directory */}
+                <div className="bg-[#101412] border border-[#252B26] rounded-xl overflow-hidden space-y-0">
+                  <div className="p-4 border-b border-[#252B26] flex items-center justify-between">
+                    <div>
+                      <h3 className="text-sm font-bold text-[#E9E8DF]">Client Organization Matrix</h3>
+                      <p className="text-[11px] text-[#A5AAA1]">
+                        Aggregated secrets summary. Sensitive credentials masked by default.
+                      </p>
+                    </div>
+                    <span className="text-xs text-[#6F766E]">{clients.length} Client Organizations</span>
+                  </div>
+
+                  {clients.length === 0 ? (
+                    <div className="p-8 text-center text-xs text-[#6F766E]">
+                      No client organizations configured.
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-xs">
+                        <thead className="bg-[#0A0D0B] text-[#A5AAA1] uppercase tracking-wider text-[10px] border-b border-[#1F2620]">
+                          <tr>
+                            <th className="px-4 py-3">Client Organization</th>
+                            <th className="px-4 py-3">Identifier</th>
+                            <th className="px-4 py-3">Stored Secrets</th>
+                            <th className="px-4 py-3">Password Security</th>
+                            <th className="px-4 py-3 text-right">Vault Action</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-[#1F2620]">
+                          {clients.map((c) => {
+                            const cCreds = platformCredentials[c.id] || [];
+                            return (
+                              <tr key={c.id} className="hover:bg-[#141A16] transition-colors">
+                                <td className="px-4 py-3.5 font-semibold text-[#E9E8DF]">{c.name}</td>
+                                <td className="px-4 py-3.5 text-[#6F766E] font-mono text-[11px]">{c.identifier}</td>
+                                <td className="px-4 py-3.5">
+                                  <span className="px-2 py-0.5 rounded-full bg-[#171D18] text-[#75F09A] font-semibold text-[11px] border border-[#34372D]">
+                                    {cCreds.length} Secret{cCreds.length === 1 ? '' : 's'}
+                                  </span>
+                                </td>
+                                <td className="px-4 py-3.5 text-[#A5AAA1]">
+                                  <span className="text-xs font-mono tracking-widest text-[#6F766E]">••••••••••••</span>
+                                </td>
+                                <td className="px-4 py-3.5 text-right">
+                                  <button
+                                    onClick={() => {
+                                      setActiveClient(c);
+                                      setCurrentTab('vaults');
+                                    }}
+                                    className="px-2.5 py-1 bg-[#171D18] hover:bg-[#1F2620] border border-[#34372D] text-[#75F09A] rounded text-xs font-medium transition-colors"
+                                  >
+                                    Open Vault →
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+
           {/* TAB 1: CLIENT PASSWORDS */}
           {currentTab === 'vaults' && (
             <div className="space-y-6">
@@ -2239,9 +3033,25 @@ export default function App() {
                           </div>
 
                           {cred.usernameCiphertext && (
-                            <div className="text-xs text-[#A5AAA1]">
-                              <span className="text-[#6F766E]">User:</span>{' '}
-                              <span className="text-[#E9E8DF] font-medium">{cred.usernameCiphertext}</span>
+                            <div className="text-xs text-[#A5AAA1] flex items-center justify-between">
+                              <div className="flex items-center space-x-1.5 truncate">
+                                <span className="text-[#6F766E]">User:</span>{' '}
+                                <span className="text-[#E9E8DF] font-medium truncate font-mono">
+                                  {decryptedUsernames[cred.id] ||
+                                    (!cred.usernameNonce ? cred.usernameCiphertext : '••••••••')}
+                                </span>
+                              </div>
+                              <button
+                                onClick={() => handleCopyUsername(cred)}
+                                className="p-1 text-[#A5AAA1] hover:text-[#75F09A] rounded transition-colors shrink-0"
+                                title="Copy username"
+                              >
+                                {copiedUsernameId === cred.id ? (
+                                  <Check className="w-3 h-3 text-[#3FAF63]" />
+                                ) : (
+                                  <Copy className="w-3 h-3" />
+                                )}
+                              </button>
                             </div>
                           )}
 
@@ -2473,6 +3283,15 @@ export default function App() {
 
                       <div className="flex items-center space-x-2 shrink-0 self-end md:self-center">
                         <button
+                          onClick={() => handleOpenEditUser(u)}
+                          className="px-2.5 py-1.5 bg-[#171D18] hover:bg-[#1F2620] border border-[#34372D] text-[#75F09A] rounded-lg text-xs font-medium flex items-center space-x-1"
+                          title="Edit User Permissions & Client Access"
+                        >
+                          <Edit3 className="w-3.5 h-3.5" />
+                          <span>Edit</span>
+                        </button>
+
+                        <button
                           onClick={() => setResetTargetUser(u)}
                           className="px-2.5 py-1.5 bg-[#171D18] hover:bg-[#1F2620] border border-[#34372D] text-[#C9A84E] rounded-lg text-xs font-medium"
                           title="Reset Password (Administrative Override)"
@@ -2656,33 +3475,129 @@ export default function App() {
             </div>
           )}
 
-          {/* TAB 7: USER PROFILE (Section 17) */}
+          {/* TAB 7: USER PROFILE (Section 17 & Self Profile Editing) */}
           {currentTab === 'profile' && (
             <div className="max-w-2xl mx-auto space-y-6">
-              <div className="pb-4 border-b border-[#252B26]">
-                <h1 className="text-2xl font-bold tracking-tight text-[#E9E8DF]">My Profile & Governance</h1>
-                <p className="text-xs text-[#A5AAA1] mt-0.5">View and update your personal information</p>
+              <div className="pb-4 border-b border-[#252B26] flex items-center justify-between">
+                <div>
+                  <h1 className="text-2xl font-bold tracking-tight text-[#E9E8DF]">My Profile & Governance</h1>
+                  <p className="text-xs text-[#A5AAA1] mt-0.5">View and update your personal information</p>
+                </div>
+                {!isEditingSelfProfile && (
+                  <button
+                    onClick={handleStartEditSelfProfile}
+                    className="px-3 py-1.5 bg-[#171D18] hover:bg-[#1F2620] border border-[#34372D] text-[#75F09A] rounded-lg text-xs font-medium flex items-center space-x-1.5 transition-colors"
+                  >
+                    <Edit3 className="w-3.5 h-3.5" />
+                    <span>Edit Profile Details</span>
+                  </button>
+                )}
               </div>
 
-              <div className="bg-[#101412] border border-[#252B26] rounded-2xl p-6 space-y-4">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
-                  <div>
-                    <label className="text-[#6F766E] block mb-1 uppercase tracking-wider text-[10px]">Full Name</label>
-                    <div className="text-sm font-semibold text-[#E9E8DF]">{currentUser.fullName}</div>
-                  </div>
-                  <div>
-                    <label className="text-[#6F766E] block mb-1 uppercase tracking-wider text-[10px]">Canonical System Role</label>
-                    <div className="text-sm font-semibold text-[#75F09A] uppercase">{currentUser.role}</div>
-                  </div>
-                  <div>
-                    <label className="text-[#6F766E] block mb-1 uppercase tracking-wider text-[10px]">Primary Email</label>
-                    <div className="text-sm font-semibold text-[#E9E8DF]">{currentUser.email}</div>
-                  </div>
-                  <div>
-                    <label className="text-[#6F766E] block mb-1 uppercase tracking-wider text-[10px]">Company Role Title</label>
-                    <div className="text-sm font-semibold text-[#E9E8DF]">{currentUser.roleInCompany || 'Specialist'}</div>
-                  </div>
+              {selfProfileSuccess && (
+                <div className="p-3 bg-[#102719] border border-[#45C46B]/40 text-[#75F09A] text-xs rounded-lg flex items-center space-x-2">
+                  <CheckCircle className="w-4 h-4 shrink-0" />
+                  <span>{selfProfileSuccess}</span>
                 </div>
+              )}
+
+              {selfProfileError && (
+                <div className="p-3 bg-[#2A1110] border border-[#C94B45]/40 text-[#C94B45] text-xs rounded-lg flex items-center space-x-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                  <span>{selfProfileError}</span>
+                </div>
+              )}
+
+              <div className="bg-[#101412] border border-[#252B26] rounded-2xl p-6 space-y-4">
+                {!isEditingSelfProfile ? (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+                    <div>
+                      <label className="text-[#6F766E] block mb-1 uppercase tracking-wider text-[10px]">Full Name</label>
+                      <div className="text-sm font-semibold text-[#E9E8DF]">{currentUser.fullName}</div>
+                    </div>
+                    <div>
+                      <label className="text-[#6F766E] block mb-1 uppercase tracking-wider text-[10px]">Canonical System Role</label>
+                      <div className="text-sm font-semibold text-[#75F09A] uppercase">{currentUser.role}</div>
+                    </div>
+                    <div>
+                      <label className="text-[#6F766E] block mb-1 uppercase tracking-wider text-[10px]">Primary Email</label>
+                      <div className="text-sm font-semibold text-[#E9E8DF]">{currentUser.email}</div>
+                    </div>
+                    <div>
+                      <label className="text-[#6F766E] block mb-1 uppercase tracking-wider text-[10px]">Company Role Title</label>
+                      <div className="text-sm font-semibold text-[#E9E8DF]">{currentUser.roleInCompany || 'Specialist'}</div>
+                    </div>
+                    <div>
+                      <label className="text-[#6F766E] block mb-1 uppercase tracking-wider text-[10px]">Personal Email</label>
+                      <div className="text-sm font-semibold text-[#E9E8DF]">{currentUser.personalEmail || 'Not specified'}</div>
+                    </div>
+                    <div>
+                      <label className="text-[#6F766E] block mb-1 uppercase tracking-wider text-[10px]">Phone Number</label>
+                      <div className="text-sm font-semibold text-[#E9E8DF]">{currentUser.phoneNumber || 'Not specified'}</div>
+                    </div>
+                  </div>
+                ) : (
+                  <form onSubmit={handleSaveSelfProfile} className="space-y-4 text-xs">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="text-[#A5AAA1] block mb-1 uppercase tracking-wider text-[10px] font-medium">Full Name *</label>
+                        <input
+                          type="text"
+                          required
+                          value={selfFullName}
+                          onChange={(e) => setSelfFullName(e.target.value)}
+                          className="w-full px-3 py-2 bg-[#0C100E] border border-[#34372D] focus:border-[#3FAF63] rounded-lg text-xs text-[#E9E8DF] outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[#A5AAA1] block mb-1 uppercase tracking-wider text-[10px] font-medium">Company Role Title</label>
+                        <input
+                          type="text"
+                          value={selfRoleInCompany}
+                          onChange={(e) => setSelfRoleInCompany(e.target.value)}
+                          className="w-full px-3 py-2 bg-[#0C100E] border border-[#34372D] focus:border-[#3FAF63] rounded-lg text-xs text-[#E9E8DF] outline-none"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="text-[#A5AAA1] block mb-1 uppercase tracking-wider text-[10px] font-medium">Personal Email</label>
+                        <input
+                          type="email"
+                          value={selfPersonalEmail}
+                          onChange={(e) => setSelfPersonalEmail(e.target.value)}
+                          className="w-full px-3 py-2 bg-[#0C100E] border border-[#34372D] focus:border-[#3FAF63] rounded-lg text-xs text-[#E9E8DF] outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[#A5AAA1] block mb-1 uppercase tracking-wider text-[10px] font-medium">Phone Number</label>
+                        <input
+                          type="tel"
+                          value={selfPhone}
+                          onChange={(e) => setSelfPhone(e.target.value)}
+                          className="w-full px-3 py-2 bg-[#0C100E] border border-[#34372D] focus:border-[#3FAF63] rounded-lg text-xs text-[#E9E8DF] outline-none"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex justify-end space-x-2 pt-2 border-t border-[#1F2620]">
+                      <button
+                        type="button"
+                        onClick={() => setIsEditingSelfProfile(false)}
+                        className="px-3.5 py-1.5 bg-[#171D18] hover:bg-[#1F2620] text-[#A5AAA1] rounded-lg text-xs"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        className="px-3.5 py-1.5 bg-[#3FAF63] hover:bg-[#52C978] text-[#071009] rounded-lg text-xs font-bold"
+                      >
+                        Save Profile Changes
+                      </button>
+                    </div>
+                  </form>
+                )}
 
                 {isAgent && currentUser.supervisingTimekeepers && currentUser.supervisingTimekeepers.length > 0 && (
                   <div className="p-3 bg-[#0A0D0B] border border-[#1F2620] rounded-xl text-xs space-y-1">
@@ -2713,6 +3628,119 @@ export default function App() {
                     className="px-3.5 py-2 bg-[#171D18] hover:bg-[#1C241E] border border-[#34372D] text-[#E9E8DF] rounded-lg text-xs font-semibold"
                   >
                     Change Password
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 8: DOMAIN AUTHENTICATION & ACCESS CONTROL (Section 3 & 8) */}
+          {currentTab === 'domains' && isTimekeeper && (
+            <div className="space-y-6">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-[#252B26] gap-3">
+                <div>
+                  <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-[#E9E8DF]">
+                    Domain Authentication & Access Control
+                  </h1>
+                  <p className="text-xs text-[#A5AAA1] mt-0.5">
+                    Only users with email addresses matching these allowed domains can register, login, or access agency resources
+                  </p>
+                </div>
+                <button
+                  onClick={() => {
+                    setNewDomainInput('');
+                    setShowAddDomainModal(true);
+                  }}
+                  className="px-3.5 py-1.5 bg-[#3FAF63] hover:bg-[#52C978] text-[#071009] rounded-lg text-xs font-semibold flex items-center space-x-1.5 self-start sm:self-auto"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Add Allowed Domain</span>
+                </button>
+              </div>
+
+              {/* Active Allowed Domains Grid */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                {allowedDomains.map((dom) => {
+                  const isDefaultDomain = dom === '@gmail.com' || dom === '@mybusinessmate.ai';
+                  return (
+                    <div
+                      key={dom}
+                      className="bg-[#101412] border border-[#252B26] rounded-xl p-4 flex flex-col justify-between space-y-3"
+                    >
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center space-x-2">
+                            <Globe className="w-4 h-4 text-[#3FAF63]" />
+                            <span className="text-sm font-bold text-[#E9E8DF] font-mono">{dom}</span>
+                          </div>
+                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#102719] text-[#75F09A] font-semibold border border-[#45C46B]/30">
+                            Active Whitelist
+                          </span>
+                        </div>
+                        {isDefaultDomain && (
+                          <div className="text-[10px] text-[#C9A84E]">Default Corporate Whitelist</div>
+                        )}
+                      </div>
+
+                      <div className="flex items-center justify-between pt-2 border-t border-[#1F2620] text-xs">
+                        <button
+                          onClick={() => handleOpenEditDomain(dom)}
+                          className="px-2 py-1 text-[#A5AAA1] hover:text-[#E9E8DF] hover:bg-[#171D18] rounded flex items-center space-x-1"
+                        >
+                          <Edit3 className="w-3 h-3" />
+                          <span>Edit</span>
+                        </button>
+                        <button
+                          onClick={() => handleRemoveDomain(dom)}
+                          className="px-2 py-1 text-[#C94B45] hover:bg-[#2A1110] rounded flex items-center space-x-1"
+                          title="Remove domain from whitelist"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          <span>Remove</span>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Strict Enforcement Info Card */}
+              <div className="bg-[#0C100E] border border-[#1F2620] rounded-xl p-4 space-y-2 text-xs">
+                <div className="font-semibold text-[#E9E8DF] flex items-center space-x-2">
+                  <ShieldCheck className="w-4 h-4 text-[#3FAF63]" />
+                  <span>Enforcement Architecture & RFC 5322 Standards</span>
+                </div>
+                <ul className="text-[11px] text-[#A5AAA1] space-y-1 list-disc pl-5">
+                  <li>Emails are normalized to lowercase and validated against RFC 5322 structure.</li>
+                  <li>Hyphens in the local name and domain (e.g. <code>Shezan-op@mybusinessmate.ai</code>) are fully supported.</li>
+                  <li>Unregistered domains are rejected immediately with HTTP 403 Forbidden on both frontend and API routes.</li>
+                </ul>
+              </div>
+
+              {/* DANGER ZONE: CLEAN SLATE USER DATABASE RESET */}
+              <div className="mt-8 border border-[#C94B45]/40 bg-[#160D0C] rounded-2xl p-6 space-y-4">
+                <div className="flex items-start space-x-3">
+                  <div className="p-2 bg-[#2A1110] border border-[#C94B45]/50 rounded-lg text-[#C94B45] shrink-0">
+                    <AlertTriangle className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold text-[#E9E8DF]">Danger Zone: Reset User Database to Clean Slate</h3>
+                    <p className="text-xs text-[#A5AAA1] mt-1">
+                      Permanently purges all user accounts, password hashes, and authorization codes. System configuration, client organizations, and allowed domains (<code>@gmail.com</code>, <code>@mybusinessmate.ai</code>) are safely preserved.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="pt-2 flex justify-end">
+                  <button
+                    onClick={() => {
+                      setCleanResetConfirmText('');
+                      setCleanResetError('');
+                      setShowCleanResetModal(true);
+                    }}
+                    className="px-4 py-2 bg-[#2A1110] hover:bg-[#3D1817] border border-[#C94B45] text-[#C94B45] hover:text-[#E9E8DF] rounded-lg text-xs font-bold uppercase tracking-wider transition-all"
+                  >
+                    Reset User Accounts to Clean Slate
                   </button>
                 </div>
               </div>
@@ -3589,6 +4617,351 @@ export default function App() {
                   className="px-4 py-2 bg-[#3FAF63] hover:bg-[#52C978] text-[#071009] rounded-lg font-bold"
                 >
                   Update My Password
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* --- MODAL: EDIT USER PERMISSIONS & GOVERNANCE --- */}
+      {showEditUserModal && editingUser && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#101412] border border-[#252B26] rounded-2xl max-w-lg w-full p-6 space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-[#252B26]">
+              <div>
+                <h3 className="text-base font-bold text-[#E9E8DF]">Edit User Permissions & Access</h3>
+                <p className="text-xs text-[#A5AAA1]">{editingUser.email}</p>
+              </div>
+              <button onClick={() => setShowEditUserModal(false)} className="text-[#A5AAA1] hover:text-[#E9E8DF]">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {editUserError && (
+              <div className="p-3 bg-[#2A1110] border border-[#C94B45]/40 text-[#C94B45] text-xs rounded-lg flex items-center space-x-2">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>{editUserError}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleSaveEditUser} className="space-y-4 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[#A5AAA1] block mb-1 uppercase tracking-wider text-[10px] font-medium">Full Name *</label>
+                  <input
+                    type="text"
+                    required
+                    value={editUserFullName}
+                    onChange={(e) => setEditUserFullName(e.target.value)}
+                    className="w-full px-3 py-2 bg-[#0C100E] border border-[#34372D] focus:border-[#3FAF63] rounded-lg text-xs text-[#E9E8DF] outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[#A5AAA1] block mb-1 uppercase tracking-wider text-[10px] font-medium">Access Role *</label>
+                  <select
+                    value={editUserRole}
+                    onChange={(e) => setEditUserRole(e.target.value as UserRole)}
+                    className="w-full px-3 py-2 bg-[#0C100E] border border-[#34372D] focus:border-[#3FAF63] rounded-lg text-xs text-[#E9E8DF] outline-none"
+                  >
+                    <option value="timekeeper">Timekeeper (Master Admin)</option>
+                    <option value="agent">Agent (Supervisor / Dept Head)</option>
+                    <option value="variant">Variant (Standard Team Member)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[#A5AAA1] block mb-1 uppercase tracking-wider text-[10px] font-medium">Company Email</label>
+                  <input
+                    type="email"
+                    value={editUserCompanyEmail}
+                    onChange={(e) => setEditUserCompanyEmail(e.target.value)}
+                    className="w-full px-3 py-2 bg-[#0C100E] border border-[#34372D] focus:border-[#3FAF63] rounded-lg text-xs text-[#E9E8DF] outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[#A5AAA1] block mb-1 uppercase tracking-wider text-[10px] font-medium">Personal Email</label>
+                  <input
+                    type="email"
+                    placeholder="personal@gmail.com"
+                    value={editUserPersonalEmail}
+                    onChange={(e) => setEditUserPersonalEmail(e.target.value)}
+                    className="w-full px-3 py-2 bg-[#0C100E] border border-[#34372D] focus:border-[#3FAF63] rounded-lg text-xs text-[#E9E8DF] outline-none"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[#A5AAA1] block mb-1 uppercase tracking-wider text-[10px] font-medium">Phone Number</label>
+                  <input
+                    type="tel"
+                    placeholder="+1-555-0199"
+                    value={editUserPhone}
+                    onChange={(e) => setEditUserPhone(e.target.value)}
+                    className="w-full px-3 py-2 bg-[#0C100E] border border-[#34372D] focus:border-[#3FAF63] rounded-lg text-xs text-[#E9E8DF] outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[#A5AAA1] block mb-1 uppercase tracking-wider text-[10px] font-medium">Role In Company</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Senior Media Buyer"
+                    value={editUserRoleInCompany}
+                    onChange={(e) => setEditUserRoleInCompany(e.target.value)}
+                    className="w-full px-3 py-2 bg-[#0C100E] border border-[#34372D] focus:border-[#3FAF63] rounded-lg text-xs text-[#E9E8DF] outline-none"
+                  />
+                </div>
+              </div>
+
+              {/* Assigned Clients (For Agent & Variant) */}
+              {editUserRole !== 'timekeeper' && (
+                <div>
+                  <label className="text-[#A5AAA1] block mb-1 uppercase tracking-wider text-[10px] font-medium">
+                    Assigned Clients ({editUserAssignedClients.length} Selected)
+                  </label>
+                  <div className="max-h-32 overflow-y-auto bg-[#0C100E] border border-[#34372D] rounded-lg p-2 space-y-1">
+                    {clients.map((c) => (
+                      <label key={c.id} className="flex items-center space-x-2 text-xs text-[#E9E8DF] cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={editUserAssignedClients.includes(c.id)}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setEditUserAssignedClients((prev) => [...prev, c.id]);
+                            } else {
+                              setEditUserAssignedClients((prev) => prev.filter((id) => id !== c.id));
+                            }
+                          }}
+                          className="accent-[#3FAF63]"
+                        />
+                        <span>{c.name}</span>
+                      </label>
+                    ))}
+                    {clients.length === 0 && <span className="text-[#6F766E] text-[11px]">No clients created yet.</span>}
+                  </div>
+                </div>
+              )}
+
+              {/* Supervising Timekeepers (For Agent) */}
+              {editUserRole === 'agent' && (
+                <div>
+                  <label className="text-[#C9A84E] block mb-1 uppercase tracking-wider text-[10px] font-semibold">
+                    Under Observation Of (1 to 3 Supervising Timekeepers)
+                  </label>
+                  <div className="bg-[#0C100E] border border-[#34372D] rounded-lg p-2 space-y-1 max-h-28 overflow-y-auto">
+                    {managedUsers
+                      .filter((m) => m.role === 'timekeeper' && m.isActive)
+                      .map((tk) => (
+                        <label key={tk.id} className="flex items-center space-x-2 text-xs text-[#E9E8DF] cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={editUserSupervisingTKs.includes(tk.id)}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                if (editUserSupervisingTKs.length >= 3) {
+                                  alert('Maximum 3 supervising Timekeepers allowed.');
+                                  return;
+                                }
+                                setEditUserSupervisingTKs((prev) => [...prev, tk.id]);
+                              } else {
+                                setEditUserSupervisingTKs((prev) => prev.filter((id) => id !== tk.id));
+                              }
+                            }}
+                            className="accent-[#3FAF63]"
+                          />
+                          <span>{tk.fullName} ({tk.email})</span>
+                        </label>
+                      ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="flex justify-end space-x-2 pt-2 border-t border-[#1F2620]">
+                <button
+                  type="button"
+                  onClick={() => setShowEditUserModal(false)}
+                  className="px-4 py-2 bg-[#171D18] hover:bg-[#1F2620] text-[#A5AAA1] rounded-lg"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 bg-[#3FAF63] hover:bg-[#52C978] text-[#071009] rounded-lg font-bold"
+                >
+                  Save Permissions & Access
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* --- MODAL: ADD ALLOWED DOMAIN --- */}
+      {showAddDomainModal && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#101412] border border-[#252B26] rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between pb-3 border-b border-[#252B26]">
+              <h3 className="text-base font-bold text-[#E9E8DF]">Add Allowed Email Domain</h3>
+              <button onClick={() => setShowAddDomainModal(false)} className="text-[#A5AAA1] hover:text-[#E9E8DF]">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-xs text-[#A5AAA1]">
+              Only users with email addresses matching this domain suffix will be allowed to authenticate or register in the agency portal.
+            </p>
+
+            <form onSubmit={handleAddDomain} className="space-y-4 text-xs">
+              <div>
+                <label className="text-[#A5AAA1] block mb-1 uppercase tracking-wider text-[10px] font-medium">Domain Suffix</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="@yourcompany.com"
+                  value={newDomainInput}
+                  onChange={(e) => setNewDomainInput(e.target.value)}
+                  className="w-full px-3 py-2 bg-[#0C100E] border border-[#34372D] focus:border-[#3FAF63] rounded-lg text-xs text-[#E9E8DF] outline-none font-mono"
+                />
+                <span className="text-[10px] text-[#6F766E] mt-1 block">Default domains: @gmail.com, @mybusinessmate.ai</span>
+              </div>
+
+              <div className="flex justify-end space-x-2 pt-2 border-t border-[#1F2620]">
+                <button
+                  type="button"
+                  onClick={() => setShowAddDomainModal(false)}
+                  className="px-4 py-2 bg-[#171D18] hover:bg-[#1F2620] text-[#A5AAA1] rounded-lg"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 bg-[#3FAF63] hover:bg-[#52C978] text-[#071009] rounded-lg font-bold"
+                >
+                  Add Allowed Domain
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* --- MODAL: EDIT ALLOWED DOMAIN --- */}
+      {showEditDomainModal && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#101412] border border-[#252B26] rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between pb-3 border-b border-[#252B26]">
+              <h3 className="text-base font-bold text-[#E9E8DF]">Edit Allowed Domain</h3>
+              <button onClick={() => setShowEditDomainModal(false)} className="text-[#A5AAA1] hover:text-[#E9E8DF]">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-xs text-[#A5AAA1]">
+              Modifying <span className="font-mono text-[#E9E8DF]">{editingDomainOld}</span> in the allowed domain whitelist.
+            </p>
+
+            <form onSubmit={handleSaveEditDomain} className="space-y-4 text-xs">
+              <div>
+                <label className="text-[#A5AAA1] block mb-1 uppercase tracking-wider text-[10px] font-medium">Domain Suffix</label>
+                <input
+                  type="text"
+                  required
+                  value={editingDomainNew}
+                  onChange={(e) => setEditingDomainNew(e.target.value)}
+                  className="w-full px-3 py-2 bg-[#0C100E] border border-[#34372D] focus:border-[#3FAF63] rounded-lg text-xs text-[#E9E8DF] outline-none font-mono"
+                />
+              </div>
+
+              <div className="flex justify-end space-x-2 pt-2 border-t border-[#1F2620]">
+                <button
+                  type="button"
+                  onClick={() => setShowEditDomainModal(false)}
+                  className="px-4 py-2 bg-[#171D18] hover:bg-[#1F2620] text-[#A5AAA1] rounded-lg"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 bg-[#3FAF63] hover:bg-[#52C978] text-[#071009] rounded-lg font-bold"
+                >
+                  Update Domain
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* --- MODAL: DANGER ZONE CLEAN SLATE RESET --- */}
+      {showCleanResetModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-[#120B0A] border-2 border-[#C94B45] rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center space-x-3 pb-3 border-b border-[#301614]">
+              <div className="p-2 bg-[#2A1110] rounded-lg text-[#C94B45]">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-[#E9E8DF]">Danger: Reset User Database</h3>
+                <p className="text-xs text-[#C94B45]">Clean Slate Confirmation</p>
+              </div>
+            </div>
+
+            <div className="p-3 bg-[#1C0D0C] rounded-lg text-xs text-[#A5AAA1] space-y-2 border border-[#301614]">
+              <p className="text-[#E9E8DF] font-semibold">What will happen:</p>
+              <ul className="list-disc pl-4 space-y-1 text-[11px]">
+                <li>All user accounts, password hashes, and authorization codes are permanently purged.</li>
+                <li>All active sessions are terminated immediately.</li>
+                <li>System configurations, client organizations, and allowed domains (<span className="text-[#3FAF63]">@gmail.com</span>, <span className="text-[#3FAF63]">@mybusinessmate.ai</span>) will be safely preserved.</li>
+                <li>You will be redirected to bootstrap a new master Timekeeper account.</li>
+              </ul>
+            </div>
+
+            {cleanResetError && (
+              <div className="p-2.5 bg-[#2A1110] border border-[#C94B45]/50 text-[#C94B45] text-xs rounded-lg flex items-center space-x-2">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>{cleanResetError}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleCleanResetUsers} className="space-y-4 text-xs">
+              <div>
+                <label className="text-[#A5AAA1] block mb-1 uppercase tracking-wider text-[10px] font-medium">
+                  Type <span className="font-bold text-[#C94B45] font-mono">RESET USERS</span> to confirm:
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="RESET USERS"
+                  value={cleanResetConfirmText}
+                  onChange={(e) => setCleanResetConfirmText(e.target.value)}
+                  className="w-full px-3 py-2 bg-[#0C100E] border border-[#C94B45]/50 focus:border-[#C94B45] rounded-lg text-xs text-[#E9E8DF] outline-none font-mono"
+                />
+              </div>
+
+              <div className="flex justify-end space-x-2 pt-2 border-t border-[#301614]">
+                <button
+                  type="button"
+                  onClick={() => setShowCleanResetModal(false)}
+                  className="px-4 py-2 bg-[#171D18] hover:bg-[#1F2620] text-[#A5AAA1] rounded-lg"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={cleanResetConfirmText !== 'RESET USERS'}
+                  className={`px-4 py-2 rounded-lg font-bold transition-all ${
+                    cleanResetConfirmText === 'RESET USERS'
+                      ? 'bg-[#C94B45] hover:bg-[#D65D57] text-white cursor-pointer'
+                      : 'bg-[#2A1110] text-[#6F766E] cursor-not-allowed border border-[#301614]'
+                  }`}
+                >
+                  Permanently Reset Users
                 </button>
               </div>
             </form>
