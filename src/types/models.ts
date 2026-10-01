@@ -25,6 +25,7 @@ export interface User {
   lastPasswordChangedAt?: string; // ISO date of last password change
   authCodeHash?: string; // Argon2id/SHA256 hash of secret authorization code (timekeepers only)
   authCodeSalt?: string;
+  avatarUrl?: string; // Approved profile avatar image URL/path
 }
 
 export interface UserCryptoKeyRecord {
@@ -207,5 +208,13 @@ export interface PasswordHealthStats {
 export interface PlatformCountStat {
   platformName: string;
   count: number;
+}
+
+export interface AvatarOption {
+  id: string;
+  name: string;
+  url: string;
+  roleCategory?: OrgRole | 'all';
+  isDefault?: boolean;
 }
 

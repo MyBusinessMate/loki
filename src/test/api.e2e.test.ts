@@ -794,4 +794,106 @@ describe('Loki End-to-End API Security Test Suite (Section 49, 52, 57 Compliance
     expect(statsRes.body.passwordHealth).toBeDefined();
     expect(Array.isArray(statsRes.body.platforms)).toBe(true);
   });
+
+  it('TEST-E2E-12: Avatar catalog management and role-based avatar assignment', async () => {
+    // 1. Timekeeper registers
+    const keyPair = await LokiCryptoService.generateUserKeyPair();
+    const salt = await LokiCryptoService.generateSalt();
+    const kek = await LokiCryptoService.deriveKEK('MasterPass#2026', salt);
+    const encPkg = await LokiCryptoService.encryptPrivateKey(keyPair.privateKey, kek);
+
+    const tkRes = await request(app)
+      .post('/api/auth/register')
+      .set('X-Loki-CSRF-Protection', '1')
+      .send({
+        email: 'timekeeper.avatars@mybusinessmate.ai',
+        password: 'MasterPass#2026',
+        fullName: 'Avatar Admin',
+        kdfSalt: salt,
+        publicKey: keyPair.publicKey,
+        encryptedPrivateKey: encPkg.encryptedPrivateKey,
+        privateKeyNonce: encPkg.nonce,
+      });
+    const tkToken = tkRes.body.tokens.accessToken;
+    expect(tkRes.body.user.avatarUrl).toBe('/avatars/timekeeper.png');
+
+    // 2. View avatar catalog
+    const catalogRes = await request(app)
+      .get('/api/settings/avatars')
+      .set('Authorization', `Bearer ${tkToken}`);
+    expect(catalogRes.status).toBe(200);
+    expect(catalogRes.body.avatars.length).toBeGreaterThanOrEqual(3);
+    const timekeeperAvatar = catalogRes.body.avatars.find((a: any) => a.url === '/avatars/timekeeper.png');
+    expect(timekeeperAvatar).toBeDefined();
+
+    // 3. Timekeeper creates an Agent user
+    const createAgentRes = await request(app)
+      .post('/api/admin/users')
+      .set('Authorization', `Bearer ${tkToken}`)
+      .set('X-Loki-CSRF-Protection', '1')
+      .send({
+        email: 'field.agent@mybusinessmate.ai',
+        password: 'AgentPass#2026',
+        fullName: 'Field Agent 007',
+        role: 'agent',
+      });
+    expect(createAgentRes.status).toBe(201);
+    expect(createAgentRes.body.user.avatarUrl).toBe('/avatars/agent.png');
+
+    // 4. Agent logs in
+    const agentLogin = await request(app)
+      .post('/api/auth/login')
+      .send({
+        email: 'field.agent@mybusinessmate.ai',
+        password: 'AgentPass#2026',
+      });
+    expect(agentLogin.status).toBe(200);
+    const agentToken = agentLogin.body.tokens.accessToken;
+    expect(agentLogin.body.user.avatarUrl).toBe('/avatars/agent.png');
+
+    // 5. Agent tries to set an unapproved arbitrary URL -> Must be rejected (400)
+    const badAvatarRes = await request(app)
+      .put('/api/users/me')
+      .set('Authorization', `Bearer ${agentToken}`)
+      .set('X-Loki-CSRF-Protection', '1')
+      .send({
+        avatarUrl: 'https://evil.attacker.com/malicious.jpg',
+      });
+    expect(badAvatarRes.status).toBe(400);
+    expect(badAvatarRes.body.error).toContain('Avatar must be selected from the approved agency catalog');
+
+    // 6. Non-admin attempts to add a new avatar to catalog -> Must be rejected (403)
+    const unauthAddRes = await request(app)
+      .post('/api/settings/avatars')
+      .set('Authorization', `Bearer ${agentToken}`)
+      .set('X-Loki-CSRF-Protection', '1')
+      .send({
+        name: 'Hacker Avatar',
+        url: '/avatars/hacker.png',
+      });
+    expect(unauthAddRes.status).toBe(403);
+
+    // 7. Timekeeper adds an approved avatar style to catalog
+    const addAvatarRes = await request(app)
+      .post('/api/settings/avatars')
+      .set('Authorization', `Bearer ${tkToken}`)
+      .set('X-Loki-CSRF-Protection', '1')
+      .send({
+        name: 'Cyber Operative Style',
+        url: '/avatars/cyber-agent.png',
+        roleCategory: 'agent',
+      });
+    expect(addAvatarRes.status).toBe(201);
+
+    // 8. Now Agent can successfully pick this newly approved avatar
+    const goodAvatarRes = await request(app)
+      .put('/api/users/me')
+      .set('Authorization', `Bearer ${agentToken}`)
+      .set('X-Loki-CSRF-Protection', '1')
+      .send({
+        avatarUrl: '/avatars/cyber-agent.png',
+      });
+    expect(goodAvatarRes.status).toBe(200);
+    expect(goodAvatarRes.body.user.avatarUrl).toBe('/avatars/cyber-agent.png');
+  });
 });

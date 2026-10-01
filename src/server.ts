@@ -128,7 +128,7 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
 
   const isFirstUser = db.users.size === 0;
   const initialRole: OrgRole = isFirstUser ? 'timekeeper' : 'variant';
-
+  const defaultAvatar = initialRole === 'timekeeper' ? '/avatars/timekeeper.png' : '/avatars/variant.png';
   const newUser: User = {
     id: userId,
     email: normalizedEmail,
@@ -138,6 +138,7 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
     isActive: true,
     isSuspended: false,
     mfaEnabled: false,
+    avatarUrl: defaultAvatar,
     passwordHistory: [],
     lastPasswordChangedAt: undefined,
   };
@@ -175,7 +176,7 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
   });
 
   res.status(201).json({
-    user: { id: newUser.id, email: newUser.email, fullName: newUser.fullName, role: initialRole },
+    user: { id: newUser.id, email: newUser.email, fullName: newUser.fullName, role: initialRole, avatarUrl: newUser.avatarUrl },
     tokens: { ...tokens, orgId },
   });
 });
@@ -254,6 +255,7 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
       email: user.email,
       fullName: user.fullName,
       role: membership.role,
+      avatarUrl: user.avatarUrl || (membership.role === 'timekeeper' ? '/avatars/timekeeper.png' : membership.role === 'agent' ? '/avatars/agent.png' : '/avatars/variant.png'),
       kdfSalt: user.kdfSalt,
       roleInCompany: user.roleInCompany,
       assignedClients: user.assignedClients || [],
@@ -480,6 +482,7 @@ app.get('/api/admin/users', requireAuth, (req: AuthenticatedRequest, res: Respon
     roleInCompany: m.user.roleInCompany || '',
     role: m.membership.role,
     isActive: m.user.isActive,
+    avatarUrl: m.user.avatarUrl || (m.membership.role === 'timekeeper' ? '/avatars/timekeeper.png' : m.membership.role === 'agent' ? '/avatars/agent.png' : '/avatars/variant.png'),
     assignedClients: m.user.assignedClients || [],
     assignedPlatforms: m.user.assignedPlatforms || {},
     supervisingTimekeepers: m.user.supervisingTimekeepers || [],
@@ -508,6 +511,7 @@ app.post('/api/admin/users', requireAuth, async (req: AuthenticatedRequest, res:
     assignedPlatforms,
     supervisingTimekeepers,
     authCode,
+    avatarUrl,
   } = req.body;
 
   if (!email || !password || !fullName || !role) {
@@ -583,6 +587,9 @@ app.post('/api/admin/users', requireAuth, async (req: AuthenticatedRequest, res:
     isActive: true,
     isSuspended: false,
     mfaEnabled: false,
+    avatarUrl: avatarUrl && db.isAvatarAllowed(avatarUrl)
+      ? avatarUrl.trim()
+      : (canonicalRole === 'timekeeper' ? '/avatars/timekeeper.png' : canonicalRole === 'agent' ? '/avatars/agent.png' : '/avatars/variant.png'),
     assignedClients: Array.isArray(assignedClients) ? assignedClients : [],
     assignedPlatforms: typeof assignedPlatforms === 'object' && assignedPlatforms ? assignedPlatforms : {},
     supervisingTimekeepers: supervisors,
@@ -617,6 +624,7 @@ app.post('/api/admin/users', requireAuth, async (req: AuthenticatedRequest, res:
       email: newUser.email,
       fullName: newUser.fullName,
       role,
+      avatarUrl: newUser.avatarUrl,
       assignedClients: newUser.assignedClients,
       assignedPlatforms: newUser.assignedPlatforms,
       supervisingTimekeepers: newUser.supervisingTimekeepers,
@@ -649,7 +657,19 @@ app.put('/api/admin/users/:userId', requireAuth, async (req: AuthenticatedReques
     supervisingTimekeepers,
     isActive,
     authCode,
+    avatarUrl,
   } = req.body;
+
+  if (avatarUrl !== undefined) {
+    if (avatarUrl) {
+      if (!db.isAvatarAllowed(avatarUrl)) {
+        return res.status(400).json({ error: 'Avatar must be selected from the approved agency catalog.' });
+      }
+      targetUser.avatarUrl = avatarUrl.trim();
+    } else {
+      targetUser.avatarUrl = undefined;
+    }
+  }
 
   if (fullName) targetUser.fullName = fullName;
   if (companyEmail) targetUser.companyEmail = companyEmail;
@@ -1411,7 +1431,7 @@ app.put('/api/users/me', requireAuth, (req: AuthenticatedRequest, res: Response)
   const user = db.findUserById(req.auth!.userId);
   if (!user) return res.status(404).json({ error: 'User not found' });
 
-  const { fullName, phoneNumber, personalEmail, companyEmail, roleInCompany } = req.body;
+  const { fullName, phoneNumber, personalEmail, companyEmail, roleInCompany, avatarUrl } = req.body;
 
   if (fullName && typeof fullName === 'string') user.fullName = fullName.trim();
   if (phoneNumber !== undefined) user.phoneNumber = String(phoneNumber).trim();
@@ -1434,6 +1454,17 @@ app.put('/api/users/me', requireAuth, (req: AuthenticatedRequest, res: Response)
   }
   if (roleInCompany !== undefined) user.roleInCompany = String(roleInCompany).trim();
 
+  if (avatarUrl !== undefined) {
+    if (avatarUrl) {
+      if (!db.isAvatarAllowed(avatarUrl)) {
+        return res.status(400).json({ error: 'Avatar must be selected from the approved agency catalog.' });
+      }
+      user.avatarUrl = avatarUrl.trim();
+    } else {
+      user.avatarUrl = undefined;
+    }
+  }
+
   db.saveUser(user);
 
   LokiAuditService.recordEvent({
@@ -1455,8 +1486,58 @@ app.put('/api/users/me', requireAuth, (req: AuthenticatedRequest, res: Response)
       personalEmail: user.personalEmail,
       phoneNumber: user.phoneNumber,
       roleInCompany: user.roleInCompany,
+      avatarUrl: user.avatarUrl,
     },
   });
+});
+
+// --- AVATAR CATALOG & ICON STYLE ENDPOINTS ---
+app.get('/api/settings/avatars', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  res.json({
+    avatars: db.getAvatarCatalog(),
+  });
+});
+
+app.post('/api/settings/avatars', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  if (req.auth!.role !== 'timekeeper' && req.auth!.role !== ('admin' as any) && req.auth!.role !== ('owner' as any)) {
+    return res.status(403).json({ error: 'Forbidden: Timekeeper access required' });
+  }
+  const { name, url, roleCategory } = req.body;
+  const result = db.addAvatarOption({ name, url, roleCategory });
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+
+  LokiAuditService.recordEvent({
+    orgId: req.auth!.orgId,
+    userId: req.auth!.userId,
+    action: 'AVATAR_STYLE_ADDED',
+    resourceType: 'setting',
+    metadata: { name, url, roleCategory },
+  });
+
+  res.status(201).json({ success: true, avatar: result.avatar, avatars: db.getAvatarCatalog() });
+});
+
+app.delete('/api/settings/avatars/:id', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  if (req.auth!.role !== 'timekeeper' && req.auth!.role !== ('admin' as any) && req.auth!.role !== ('owner' as any)) {
+    return res.status(403).json({ error: 'Forbidden: Timekeeper access required' });
+  }
+  const id = req.params.id as string;
+  const result = db.removeAvatarOption(id);
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+
+  LokiAuditService.recordEvent({
+    orgId: req.auth!.orgId,
+    userId: req.auth!.userId,
+    action: 'AVATAR_STYLE_REMOVED',
+    resourceType: 'setting',
+    metadata: { id },
+  });
+
+  res.json({ success: true, avatars: db.getAvatarCatalog() });
 });
 
 // --- TIMEKEEPER CLEAN RESET ENDPOINT (Section 6 & 12) ---

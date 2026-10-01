@@ -56,6 +56,7 @@ export interface LokiFirestoreUser {
   lastPasswordChangedAt?: string;
   authCodeHash?: string;
   authCodeSalt?: string;
+  avatarUrl?: string;
   createdAt: string;
   updatedAt?: string;
 }

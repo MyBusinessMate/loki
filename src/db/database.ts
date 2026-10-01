@@ -13,6 +13,7 @@ import {
   DeletionRequest,
   PasswordOverrideRequest,
   ClientPlatformKeyRecord,
+  AvatarOption,
 } from '../types/models.js';
 
 /**
@@ -35,6 +36,7 @@ export class LokiDatabase {
   public vaultItems: Map<string, VaultItem> = new Map();
   public sessions: Map<string, SessionRecord> = new Map();
   public allowedDomains: Set<string> = new Set(['@gmail.com', '@mybusinessmate.ai']);
+  public avatarCatalog: Map<string, AvatarOption> = new Map();
 
   constructor() {
     this.seedDefaultState();
@@ -42,6 +44,20 @@ export class LokiDatabase {
 
   seedDefaultState() {
     this.allowedDomains = new Set(['@gmail.com', '@mybusinessmate.ai']);
+    this.seedDefaultAvatars();
+  }
+
+  seedDefaultAvatars() {
+    this.avatarCatalog.clear();
+    const defaults: AvatarOption[] = [
+      { id: 'timekeeper-default', name: 'Timekeeper Sovereign', url: '/avatars/timekeeper.png', roleCategory: 'timekeeper', isDefault: true },
+      { id: 'agent-default', name: 'Agent Sentinel', url: '/avatars/agent.png', roleCategory: 'agent', isDefault: true },
+      { id: 'variant-default', name: 'Variant Operative', url: '/avatars/variant.png', roleCategory: 'variant', isDefault: true },
+      { id: 'loki-crest', name: 'Loki Agency Crest', url: '/logo.png', roleCategory: 'all', isDefault: false },
+    ];
+    for (const a of defaults) {
+      this.avatarCatalog.set(a.id, a);
+    }
   }
 
   clear() {
@@ -59,6 +75,7 @@ export class LokiDatabase {
     this.vaultItems.clear();
     this.sessions.clear();
     this.allowedDomains = new Set(['@gmail.com', '@mybusinessmate.ai']);
+    this.seedDefaultAvatars();
   }
 
   // --- Domain Authentication Operations ---
@@ -116,6 +133,57 @@ export class LokiDatabase {
     this.deletionRequests.clear();
     this.overrideRequests.clear();
     this.allowedDomains = new Set(['@gmail.com', '@mybusinessmate.ai']);
+    this.seedDefaultAvatars();
+  }
+
+  // --- Avatar Catalog Operations ---
+  getAvatarCatalog(): AvatarOption[] {
+    return Array.from(this.avatarCatalog.values());
+  }
+
+  addAvatarOption(option: { id?: string; name: string; url: string; roleCategory?: OrgRole | 'all' }): { success: boolean; avatar?: AvatarOption; error?: string } {
+    if (!option.name || !option.name.trim()) {
+      return { success: false, error: 'Avatar name is required.' };
+    }
+    if (!option.url || !option.url.trim()) {
+      return { success: false, error: 'Avatar URL or path is required.' };
+    }
+    const cleanUrl = option.url.trim();
+    if (!cleanUrl.startsWith('/') && !cleanUrl.startsWith('https://')) {
+      return { success: false, error: 'Avatar URL must be a relative path (/avatars/...) or secure HTTPS URL.' };
+    }
+
+    const id = option.id || `avatar-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const newAvatar: AvatarOption = {
+      id,
+      name: option.name.trim(),
+      url: cleanUrl,
+      roleCategory: option.roleCategory || 'all',
+      isDefault: false,
+    };
+    this.avatarCatalog.set(id, newAvatar);
+    return { success: true, avatar: newAvatar };
+  }
+
+  removeAvatarOption(id: string): { success: boolean; error?: string } {
+    const existing = this.avatarCatalog.get(id);
+    if (!existing) {
+      return { success: false, error: 'Avatar option not found.' };
+    }
+    if (existing.isDefault) {
+      return { success: false, error: 'Cannot remove system default role avatars.' };
+    }
+    this.avatarCatalog.delete(id);
+    return { success: true };
+  }
+
+  isAvatarAllowed(url: string): boolean {
+    if (!url || typeof url !== 'string') return false;
+    const clean = url.trim();
+    if (['/avatars/timekeeper.png', '/avatars/agent.png', '/avatars/variant.png', '/timekeeper.png', '/agent.png', '/variant.png', '/logo.png'].includes(clean)) {
+      return true;
+    }
+    return Array.from(this.avatarCatalog.values()).some((a) => a.url === clean);
   }
 
   // --- User Operations ---

@@ -40,6 +40,8 @@ import {
   ChevronUp,
   Layers,
   Settings,
+  Image as ImageIcon,
+  Palette,
 } from 'lucide-react';
 import { LokiCryptoService } from './crypto/crypto.service.js';
 import {
@@ -60,6 +62,7 @@ export interface AuthUser {
   role: UserRole;
   orgId: string;
   token: string;
+  avatarUrl?: string;
   companyEmail?: string;
   personalEmail?: string;
   phoneNumber?: string;
@@ -126,6 +129,7 @@ export interface ManagedUser {
   fullName: string;
   role: UserRole;
   isActive: boolean;
+  avatarUrl?: string;
   companyEmail?: string;
   personalEmail?: string;
   phoneNumber?: string;
@@ -140,6 +144,32 @@ export interface ManagedUser {
   authCodeHash?: string;
   authCodeSalt?: string;
 }
+
+export interface AvatarOption {
+  id: string;
+  name: string;
+  url: string;
+  roleCategory?: UserRole | 'all';
+  isDefault?: boolean;
+}
+
+export const DEFAULT_AVATARS: AvatarOption[] = [
+  { id: 'timekeeper-default', name: 'Timekeeper Sovereign', url: '/avatars/timekeeper.png', roleCategory: 'timekeeper', isDefault: true },
+  { id: 'agent-default', name: 'Agent Sentinel', url: '/avatars/agent.png', roleCategory: 'agent', isDefault: true },
+  { id: 'variant-default', name: 'Variant Operative', url: '/avatars/variant.png', roleCategory: 'variant', isDefault: true },
+  { id: 'loki-crest', name: 'Loki Agency Crest', url: '/logo.png', roleCategory: 'all', isDefault: false },
+];
+
+export const getRoleDefaultAvatar = (role: UserRole): string => {
+  if (role === 'timekeeper') return '/avatars/timekeeper.png';
+  if (role === 'agent') return '/avatars/agent.png';
+  return '/avatars/variant.png';
+};
+
+export const getUserAvatarUrl = (user: { avatarUrl?: string; role: UserRole } | null | undefined): string => {
+  if (!user) return '/avatars/variant.png';
+  return user.avatarUrl || getRoleDefaultAvatar(user.role);
+};
 
 /**
  * Loki Client-Side Cryptographic Password Hasher (WebCrypto PBKDF2-SHA512)
@@ -372,6 +402,27 @@ export default function App() {
   const [editUserAssignedClients, setEditUserAssignedClients] = useState<string[]>([]);
   const [editUserSupervisingTKs, setEditUserSupervisingTKs] = useState<string[]>([]);
   const [editUserError, setEditUserError] = useState('');
+  const [editUserAvatarUrl, setEditUserAvatarUrl] = useState('');
+
+  // --- Avatar Catalog & Modal States (Role Avatars & Icon Styles) ---
+  const [avatarCatalog, setAvatarCatalog] = useState<AvatarOption[]>(() => {
+    const saved = localStorage.getItem('loki_avatar_catalog');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      } catch {}
+    }
+    return DEFAULT_AVATARS;
+  });
+  const [showChooseAvatarModal, setShowChooseAvatarModal] = useState(false);
+  const [showAddAvatarModal, setShowAddAvatarModal] = useState(false);
+  const [newAvatarName, setNewAvatarName] = useState('');
+  const [newAvatarUrl, setNewAvatarUrl] = useState('');
+  const [newAvatarRoleCategory, setNewAvatarRoleCategory] = useState<UserRole | 'all'>('all');
+  const [avatarCatalogError, setAvatarCatalogError] = useState('');
+  const [avatarCatalogSuccess, setAvatarCatalogSuccess] = useState('');
+  const [newUserAvatarUrl, setNewUserAvatarUrl] = useState('');
 
   // --- Self-Profile Editing States (All Users) ---
   const [isEditingSelfProfile, setIsEditingSelfProfile] = useState(false);
@@ -503,6 +554,26 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('loki_overrides', JSON.stringify(overrideRequests));
   }, [overrideRequests]);
+
+  useEffect(() => {
+    localStorage.setItem('loki_avatar_catalog', JSON.stringify(avatarCatalog));
+  }, [avatarCatalog]);
+
+  // Sync avatar catalog from backend API if reachable
+  useEffect(() => {
+    const fetchAvatars = async () => {
+      try {
+        const res = await fetch('/api/settings/avatars');
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.avatars) && data.avatars.length > 0) {
+            setAvatarCatalog(data.avatars);
+          }
+        }
+      } catch {}
+    };
+    fetchAvatars();
+  }, []);
 
   // Sync with Firestore Cloud
   const syncWithFirebaseCloud = async () => {
@@ -780,6 +851,7 @@ export default function App() {
         role: 'timekeeper',
         orgId: 'org-loki-primary',
         token: `jwt-${Date.now()}-${Math.random().toString(36).substring(2)}`,
+        avatarUrl: getRoleDefaultAvatar('timekeeper'),
         companyEmail: emailNorm,
         personalEmail: '',
         phoneNumber: '',
@@ -795,6 +867,7 @@ export default function App() {
         fullName: newAuthUser.fullName,
         role: 'timekeeper',
         isActive: true,
+        avatarUrl: getRoleDefaultAvatar('timekeeper'),
         companyEmail: newAuthUser.companyEmail,
         personalEmail: '',
         phoneNumber: '',
@@ -825,6 +898,7 @@ export default function App() {
           fullName: newManaged.fullName,
           role: newManaged.role,
           isActive: true,
+          avatarUrl: newManaged.avatarUrl,
           companyEmail: newManaged.companyEmail,
           roleInCompany: newManaged.roleInCompany,
           createdAt: new Date().toISOString(),
@@ -919,6 +993,7 @@ export default function App() {
       email: found.email,
       fullName: found.fullName,
       role: found.role,
+      avatarUrl: found.avatarUrl || getRoleDefaultAvatar(found.role),
       orgId: 'org-loki-primary',
       token: `jwt-${Date.now()}-${Math.random().toString(36).substring(2)}`,
       companyEmail: found.companyEmail,
@@ -1575,12 +1650,15 @@ export default function App() {
     const securePasswordHash = await hashUserPasswordClient(newUserPassword);
     const secureAuthCodeHash = newUserRole === 'timekeeper' && newUserAuthCode ? await hashUserPasswordClient(newUserAuthCode) : undefined;
 
+    const initialAvatar = newUserAvatarUrl || getRoleDefaultAvatar(newUserRole);
+
     const newUser: ManagedUser = {
       id: `user-${Date.now()}`,
       email: newUserEmail.trim().toLowerCase(),
       fullName: newUserFullName.trim(),
       role: newUserRole,
       isActive: true,
+      avatarUrl: initialAvatar,
       companyEmail: newUserCompanyEmail.trim() || newUserEmail.trim().toLowerCase(),
       personalEmail: newUserPersonalEmail.trim(),
       phoneNumber: newUserPhone.trim(),
@@ -1604,6 +1682,7 @@ export default function App() {
         fullName: newUser.fullName,
         role: newUser.role,
         isActive: true,
+        avatarUrl: newUser.avatarUrl,
         companyEmail: newUser.companyEmail,
         personalEmail: newUser.personalEmail,
         phoneNumber: newUser.phoneNumber,
@@ -1624,6 +1703,7 @@ export default function App() {
     setNewUserFullName('');
     setNewUserPassword('');
     setShowNewUserPassword(false);
+    setNewUserAvatarUrl('');
     setNewUserCompanyEmail('');
     setNewUserPersonalEmail('');
     setNewUserPhone('');
@@ -1796,6 +1876,7 @@ export default function App() {
     setEditingUser(u);
     setEditUserFullName(u.fullName);
     setEditUserRole(u.role);
+    setEditUserAvatarUrl(u.avatarUrl || getRoleDefaultAvatar(u.role));
     setEditUserCompanyEmail(u.companyEmail || u.email);
     setEditUserPersonalEmail(u.personalEmail || '');
     setEditUserPhone(u.phoneNumber || '');
@@ -1827,6 +1908,7 @@ export default function App() {
       ...editingUser,
       fullName: editUserFullName.trim(),
       role: editUserRole,
+      avatarUrl: editUserAvatarUrl || getRoleDefaultAvatar(editUserRole),
       companyEmail: editUserCompanyEmail.trim() || editingUser.email,
       personalEmail: editUserPersonalEmail.trim(),
       phoneNumber: editUserPhone.trim(),
@@ -1843,6 +1925,7 @@ export default function App() {
         ...currentUser,
         fullName: updatedUser.fullName,
         role: updatedUser.role,
+        avatarUrl: updatedUser.avatarUrl,
         companyEmail: updatedUser.companyEmail,
         personalEmail: updatedUser.personalEmail,
         phoneNumber: updatedUser.phoneNumber,
@@ -1860,6 +1943,7 @@ export default function App() {
         fullName: updatedUser.fullName,
         role: updatedUser.role,
         isActive: updatedUser.isActive,
+        avatarUrl: updatedUser.avatarUrl,
         companyEmail: updatedUser.companyEmail,
         personalEmail: updatedUser.personalEmail,
         phoneNumber: updatedUser.phoneNumber,
@@ -1944,6 +2028,128 @@ export default function App() {
     recordAudit('USER_PROFILE_UPDATED', `User ${currentUser.email} updated personal profile`);
     setSelfProfileSuccess('Profile updated successfully!');
     setIsEditingSelfProfile(false);
+  };
+
+  // --- Role Avatar & Icon Style Management ---
+  const handleSelectSelfAvatar = async (selectedUrl: string) => {
+    if (!currentUser) return;
+    const allowed = avatarCatalog.some((a) => a.url === selectedUrl);
+    if (!allowed) {
+      alert('Selected avatar is not in the approved system catalog.');
+      return;
+    }
+
+    const updatedUser: AuthUser = {
+      ...currentUser,
+      avatarUrl: selectedUrl,
+    };
+    saveSession(updatedUser);
+
+    setManagedUsers((prev) =>
+      prev.map((u) => (u.id === currentUser.id ? { ...u, avatarUrl: selectedUrl } : u))
+    );
+
+    if (currentUser.token) {
+      try {
+        await fetch('/api/users/me', {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${currentUser.token}`,
+          },
+          body: JSON.stringify({ avatarUrl: selectedUrl }),
+        });
+      } catch {}
+    }
+
+    try {
+      await LokiFirebaseService.saveUserProfile({
+        id: currentUser.id,
+        email: currentUser.email,
+        fullName: currentUser.fullName,
+        role: currentUser.role,
+        isActive: true,
+        avatarUrl: selectedUrl,
+        createdAt: new Date().toISOString(),
+      });
+    } catch {}
+
+    recordAudit('AVATAR_UPDATED', `User ${currentUser.email} updated profile avatar to approved style: ${selectedUrl}`);
+    setShowChooseAvatarModal(false);
+  };
+
+  const handleAddAvatarStyle = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAvatarCatalogError('');
+    setAvatarCatalogSuccess('');
+
+    const trimmedName = newAvatarName.trim();
+    const trimmedUrl = newAvatarUrl.trim();
+
+    if (!trimmedName || !trimmedUrl) {
+      setAvatarCatalogError('Style name and image URL are required.');
+      return;
+    }
+
+    if (avatarCatalog.some((a) => a.url === trimmedUrl)) {
+      setAvatarCatalogError('An icon style with this image URL already exists in the catalog.');
+      return;
+    }
+
+    const newOption: AvatarOption = {
+      id: `avatar-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      name: trimmedName,
+      url: trimmedUrl,
+      roleCategory: newAvatarRoleCategory,
+      isDefault: false,
+    };
+
+    const updated = [...avatarCatalog, newOption];
+    setAvatarCatalog(updated);
+
+    if (currentUser?.token) {
+      try {
+        await fetch('/api/settings/avatars', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${currentUser.token}`,
+          },
+          body: JSON.stringify(newOption),
+        });
+      } catch {}
+    }
+
+    recordAudit('AVATAR_STYLE_ADDED', `Timekeeper added avatar style: ${trimmedName} (${trimmedUrl})`);
+    setAvatarCatalogSuccess(`Avatar style "${trimmedName}" registered successfully.`);
+    setNewAvatarName('');
+    setNewAvatarUrl('');
+    setNewAvatarRoleCategory('all');
+    setShowAddAvatarModal(false);
+  };
+
+  const handleRemoveAvatarStyle = async (option: AvatarOption) => {
+    if (option.isDefault) {
+      alert('Default role avatars cannot be removed from the system.');
+      return;
+    }
+    if (!window.confirm(`Are you sure you want to remove style "${option.name}" from the catalog?`)) return;
+
+    const updated = avatarCatalog.filter((a) => a.id !== option.id);
+    setAvatarCatalog(updated);
+
+    if (currentUser?.token) {
+      try {
+        await fetch(`/api/settings/avatars/${option.id}`, {
+          method: 'DELETE',
+          headers: {
+            Authorization: `Bearer ${currentUser.token}`,
+          },
+        });
+      } catch {}
+    }
+
+    recordAudit('AVATAR_STYLE_REMOVED', `Timekeeper removed avatar style: ${option.name}`);
   };
 
   // --- Allowed Domains Management (Timekeeper Only) ---
@@ -2085,14 +2291,20 @@ export default function App() {
       <div className="min-h-screen bg-[#080A09] text-[#E9E8DF] flex flex-col justify-center items-center p-4 sm:p-6 selection:bg-[#3FAF63]/30 font-sans">
         <div className="max-w-md w-full bg-[#101412] border border-[#252B26] p-6 sm:p-8 rounded-2xl shadow-[0_20px_60px_rgba(0,0,0,0.5)] space-y-6">
           <div className="text-center space-y-2">
-            <div className="w-12 h-12 rounded-xl bg-[#171D18] border border-[#34372D] flex items-center justify-center mx-auto text-[#3FAF63] shadow-[0_0_20px_rgba(63,175,99,0.15)]">
-              {isDedicatedTK ? (
-                <ShieldAlert className="w-6 h-6 text-[#C9A84E]" />
-              ) : isDedicatedAgent ? (
-                <ShieldCheck className="w-6 h-6 text-[#45C46B]" />
-              ) : (
-                <Shield className="w-6 h-6 text-[#3FAF63]" />
-              )}
+            <div className="w-16 h-16 rounded-2xl bg-[#171D18] border border-[#34372D] flex items-center justify-center mx-auto shadow-[0_0_25px_rgba(63,175,99,0.2)] p-2.5">
+              <img
+                src={
+                  isDedicatedTK
+                    ? '/avatars/timekeeper.png'
+                    : isDedicatedAgent
+                    ? '/avatars/agent.png'
+                    : isDedicatedVariant
+                    ? '/avatars/variant.png'
+                    : '/logo.png'
+                }
+                alt="Loki Authority Crest"
+                className="w-full h-full object-contain drop-shadow"
+              />
             </div>
             <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-[#E9E8DF]">
               {isBootstrapTK
@@ -2276,8 +2488,8 @@ export default function App() {
         <div>
           {/* Brand Header */}
           <div className="flex items-center space-x-3 px-2 py-3.5 mb-6 border-b border-[#252B26]">
-            <div className="w-8 h-8 rounded-lg bg-[#101412] border border-[#34372D] flex items-center justify-center text-[#3FAF63] shadow-[0_0_15px_rgba(63,175,99,0.12)]">
-              <Shield className="w-4 h-4 text-[#3FAF63]" />
+            <div className="w-8 h-8 rounded-lg bg-[#101412] border border-[#34372D] flex items-center justify-center p-1 shadow-[0_0_15px_rgba(63,175,99,0.2)] shrink-0">
+              <img src="/logo.png" alt="Loki Vault" className="w-full h-full object-contain" />
             </div>
             <div>
               <div className="flex items-center space-x-1.5">
@@ -2462,14 +2674,34 @@ export default function App() {
 
         {/* User Card & Logout */}
         <div className="border-t border-[#252B26] pt-4 space-y-3">
-          <div className="bg-[#101412] p-2.5 rounded-lg border border-[#252B26] space-y-1">
-            <div className="text-xs font-semibold text-[#E9E8DF] truncate">{currentUser.fullName}</div>
-            <div className="text-[10px] text-[#6F766E] truncate">{currentUser.email}</div>
-            {isAgent && currentUser.supervisingTimekeepers && currentUser.supervisingTimekeepers.length > 0 && (
-              <div className="text-[10px] text-[#C9A84E] pt-1 border-t border-[#1F2620]">
-                Supervised by {currentUser.supervisingTimekeepers.length} Timekeeper(s)
-              </div>
-            )}
+          <div className="bg-[#101412] p-2.5 rounded-lg border border-[#252B26] flex items-center space-x-3">
+            <div className="relative shrink-0">
+              <img
+                src={getUserAvatarUrl(currentUser)}
+                alt={currentUser.fullName}
+                className={`w-9 h-9 rounded-xl object-cover border ${
+                  isTimekeeper
+                    ? 'border-[#C9A84E] shadow-[0_0_10px_rgba(201,168,78,0.25)]'
+                    : isAgent
+                    ? 'border-[#45C46B] shadow-[0_0_10px_rgba(69,196,107,0.25)]'
+                    : 'border-[#34372D]'
+                }`}
+              />
+              <span
+                className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-[#101412] ${
+                  isTimekeeper ? 'bg-[#D9A441]' : isAgent ? 'bg-[#45C46B]' : 'bg-[#A5AAA1]'
+                }`}
+              />
+            </div>
+            <div className="overflow-hidden flex-1 space-y-0.5">
+              <div className="text-xs font-semibold text-[#E9E8DF] truncate">{currentUser.fullName}</div>
+              <div className="text-[10px] text-[#6F766E] truncate">{currentUser.email}</div>
+              {isAgent && currentUser.supervisingTimekeepers && currentUser.supervisingTimekeepers.length > 0 && (
+                <div className="text-[9px] text-[#C9A84E] pt-0.5 truncate">
+                  {currentUser.supervisingTimekeepers.length} Supervisor(s)
+                </div>
+              )}
+            </div>
           </div>
 
           <div className="flex space-x-2">
@@ -2497,9 +2729,11 @@ export default function App() {
           <div className="relative w-72 bg-[#0A0E0C] border-r border-[#252B26] p-4 flex flex-col justify-between h-full z-10">
             <div>
               <div className="flex items-center justify-between pb-4 mb-4 border-b border-[#252B26]">
-                <div className="flex items-center space-x-2">
-                  <Shield className="w-5 h-5 text-[#3FAF63]" />
-                  <span className="font-bold text-sm tracking-tight">LOKI VAULT</span>
+                <div className="flex items-center space-x-2.5">
+                  <div className="w-7 h-7 rounded-lg bg-[#101412] border border-[#34372D] flex items-center justify-center p-0.5 shadow-[0_0_10px_rgba(63,175,99,0.2)] shrink-0">
+                    <img src="/logo.png" alt="Loki Vault" className="w-full h-full object-contain" />
+                  </div>
+                  <span className="font-bold text-sm tracking-tight text-[#E9E8DF]">LOKI VAULT</span>
                 </div>
                 <button onClick={() => setMobileMenuOpen(false)} className="text-[#A5AAA1] hover:text-[#E9E8DF]">
                   <X className="w-5 h-5" />
@@ -2605,22 +2839,38 @@ export default function App() {
               </nav>
             </div>
 
-            <div className="pt-4 border-t border-[#252B26] space-y-2">
-              <button
-                onClick={() => {
-                  setMobileMenuOpen(false);
-                  setShowChangeSelfPasswordModal(true);
-                }}
-                className="w-full py-2 bg-[#171D18] rounded-lg text-xs text-[#E9E8DF]"
-              >
-                Change Password
-              </button>
-              <button
-                onClick={handleLogout}
-                className="w-full py-2 bg-[#2A1110] text-[#C94B45] rounded-lg text-xs font-semibold"
-              >
-                Sign Out
-              </button>
+            <div className="pt-4 border-t border-[#252B26] space-y-3">
+              <div className="bg-[#101412] p-2.5 rounded-lg border border-[#252B26] flex items-center space-x-3">
+                <img
+                  src={getUserAvatarUrl(currentUser)}
+                  alt={currentUser.fullName}
+                  className={`w-9 h-9 rounded-xl object-cover border ${
+                    isTimekeeper ? 'border-[#C9A84E]' : isAgent ? 'border-[#45C46B]' : 'border-[#34372D]'
+                  }`}
+                />
+                <div className="overflow-hidden flex-1 space-y-0.5">
+                  <div className="text-xs font-semibold text-[#E9E8DF] truncate">{currentUser.fullName}</div>
+                  <div className="text-[10px] text-[#6F766E] truncate">{currentUser.email}</div>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <button
+                  onClick={() => {
+                    setMobileMenuOpen(false);
+                    setShowChangeSelfPasswordModal(true);
+                  }}
+                  className="w-full py-2 bg-[#171D18] hover:bg-[#1C241E] border border-[#34372D] rounded-lg text-xs text-[#E9E8DF]"
+                >
+                  Change Password
+                </button>
+                <button
+                  onClick={handleLogout}
+                  className="w-full py-2 bg-[#2A1110] hover:bg-[#3D1817] text-[#C94B45] rounded-lg text-xs font-semibold"
+                >
+                  Sign Out
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -3237,47 +3487,60 @@ export default function App() {
                       key={u.id}
                       className="bg-[#101412] border border-[#252B26] rounded-xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-4"
                     >
-                      <div className="space-y-1.5 flex-1">
-                        <div className="flex items-center space-x-2 flex-wrap">
-                          <span className="text-sm font-bold text-[#E9E8DF]">{u.fullName}</span>
-                          <span className={`text-[10px] px-2 py-0.5 rounded uppercase font-bold border ${
+                      <div className="flex items-start space-x-3.5 flex-1">
+                        <img
+                          src={getUserAvatarUrl(u)}
+                          alt={u.fullName}
+                          className={`w-11 h-11 rounded-xl object-cover border shrink-0 mt-0.5 ${
                             u.role === 'timekeeper'
-                              ? 'bg-[#29200D] border-[#C9A84E]/40 text-[#D9A441]'
+                              ? 'border-[#C9A84E]/70 shadow-[0_0_10px_rgba(201,168,78,0.2)]'
                               : u.role === 'agent'
-                              ? 'bg-[#102719] border-[#45C46B]/40 text-[#75F09A]'
-                              : 'bg-[#171D18] border-[#34372D] text-[#A5AAA1]'
-                          }`}>
-                            {u.role}
-                          </span>
-                          <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
-                            u.isActive ? 'text-[#45C46B] bg-[#102719]' : 'text-[#C94B45] bg-[#2A1110]'
-                          }`}>
-                            {u.isActive ? 'Active' : 'Suspended'}
-                          </span>
-                        </div>
+                              ? 'border-[#45C46B]/70 shadow-[0_0_10px_rgba(69,196,107,0.2)]'
+                              : 'border-[#34372D]'
+                          }`}
+                        />
+                        <div className="space-y-1.5 flex-1">
+                          <div className="flex items-center space-x-2 flex-wrap">
+                            <span className="text-sm font-bold text-[#E9E8DF]">{u.fullName}</span>
+                            <span className={`text-[10px] px-2 py-0.5 rounded uppercase font-bold border ${
+                              u.role === 'timekeeper'
+                                ? 'bg-[#29200D] border-[#C9A84E]/40 text-[#D9A441]'
+                                : u.role === 'agent'
+                                ? 'bg-[#102719] border-[#45C46B]/40 text-[#75F09A]'
+                                : 'bg-[#171D18] border-[#34372D] text-[#A5AAA1]'
+                            }`}>
+                              {u.role}
+                            </span>
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                              u.isActive ? 'text-[#45C46B] bg-[#102719]' : 'text-[#C94B45] bg-[#2A1110]'
+                            }`}>
+                              {u.isActive ? 'Active' : 'Suspended'}
+                            </span>
+                          </div>
 
-                        <div className="text-xs text-[#A5AAA1] flex flex-wrap gap-x-4 gap-y-1">
-                          <span>Email: <strong className="text-[#E9E8DF]">{u.email}</strong></span>
-                          {u.personalEmail && <span>Personal: <strong className="text-[#E9E8DF]">{u.personalEmail}</strong></span>}
-                          {u.phoneNumber && <span>Phone: <strong className="text-[#E9E8DF]">{u.phoneNumber}</strong></span>}
-                          {u.roleInCompany && <span>Title: <strong className="text-[#E9E8DF]">{u.roleInCompany}</strong></span>}
-                        </div>
+                          <div className="text-xs text-[#A5AAA1] flex flex-wrap gap-x-4 gap-y-1">
+                            <span>Email: <strong className="text-[#E9E8DF]">{u.email}</strong></span>
+                            {u.personalEmail && <span>Personal: <strong className="text-[#E9E8DF]">{u.personalEmail}</strong></span>}
+                            {u.phoneNumber && <span>Phone: <strong className="text-[#E9E8DF]">{u.phoneNumber}</strong></span>}
+                            {u.roleInCompany && <span>Title: <strong className="text-[#E9E8DF]">{u.roleInCompany}</strong></span>}
+                          </div>
 
-                        <div className="text-[11px] text-[#6F766E] flex flex-wrap gap-x-4 gap-y-1 pt-1 border-t border-[#1F2620]">
-                          <span>
-                            Assigned Clients:{' '}
-                            <strong className="text-[#A5AAA1]">
-                              {u.role === 'timekeeper' ? 'All (Timekeeper)' : `${assignedCount} client(s)`}
-                            </strong>
-                          </span>
-                          {u.role === 'agent' && (
+                          <div className="text-[11px] text-[#6F766E] flex flex-wrap gap-x-4 gap-y-1 pt-1 border-t border-[#1F2620]">
                             <span>
-                              Under Observation Of:{' '}
-                              <strong className="text-[#C9A84E]">
-                                {supervisorNames || 'Default Timekeeper'}
+                              Assigned Clients:{' '}
+                              <strong className="text-[#A5AAA1]">
+                                {u.role === 'timekeeper' ? 'All (Timekeeper)' : `${assignedCount} client(s)`}
                               </strong>
                             </span>
-                          )}
+                            {u.role === 'agent' && (
+                              <span>
+                                Under Observation Of:{' '}
+                                <strong className="text-[#C9A84E]">
+                                  {supervisorNames || 'Default Timekeeper'}
+                                </strong>
+                              </span>
+                            )}
+                          </div>
                         </div>
                       </div>
 
@@ -3508,6 +3771,58 @@ export default function App() {
                 </div>
               )}
 
+              {/* Profile Avatar Card & Style Chooser */}
+              <div className="bg-[#101412] border border-[#252B26] rounded-2xl p-6 flex flex-col sm:flex-row items-center sm:items-start justify-between gap-5 relative overflow-hidden">
+                <div className="flex flex-col sm:flex-row items-center sm:items-start space-y-3 sm:space-y-0 sm:space-x-5 text-center sm:text-left">
+                  <div className="relative group">
+                    <img
+                      src={getUserAvatarUrl(currentUser)}
+                      alt={currentUser.fullName}
+                      className={`w-20 h-20 rounded-2xl object-cover border-2 shadow-lg transition-transform group-hover:scale-105 ${
+                        isTimekeeper
+                          ? 'border-[#C9A84E] shadow-[0_0_20px_rgba(201,168,78,0.3)]'
+                          : isAgent
+                          ? 'border-[#45C46B] shadow-[0_0_20px_rgba(69,196,107,0.3)]'
+                          : 'border-[#34372D]'
+                      }`}
+                    />
+                    <span
+                      className={`absolute -bottom-1 -right-1 w-4 h-4 rounded-full border-2 border-[#101412] ${
+                        isTimekeeper ? 'bg-[#D9A441]' : isAgent ? 'bg-[#45C46B]' : 'bg-[#A5AAA1]'
+                      }`}
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-center sm:justify-start space-x-2">
+                      <h2 className="text-lg font-bold text-[#E9E8DF]">{currentUser.fullName}</h2>
+                      <span className={`text-[10px] px-2 py-0.5 rounded uppercase font-bold border ${
+                        isTimekeeper
+                          ? 'bg-[#29200D] border-[#C9A84E]/40 text-[#D9A441]'
+                          : isAgent
+                          ? 'bg-[#102719] border-[#45C46B]/40 text-[#75F09A]'
+                          : 'bg-[#171D18] border-[#34372D] text-[#A5AAA1]'
+                      }`}>
+                        {currentUser.role}
+                      </span>
+                    </div>
+                    <p className="text-xs text-[#A5AAA1] font-mono">{currentUser.email}</p>
+                    <p className="text-[11px] text-[#6F766E] max-w-sm">
+                      Vetted icon styles ensure organizational consistency. Choose from authorized visual identities.
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setShowChooseAvatarModal(true)}
+                  className="px-4 py-2 bg-[#171D18] hover:bg-[#1F2620] border border-[#34372D] hover:border-[#3FAF63]/50 text-[#75F09A] rounded-xl text-xs font-semibold flex items-center space-x-2 transition-all shrink-0 self-center sm:self-start shadow-sm"
+                >
+                  <Palette className="w-4 h-4 text-[#3FAF63]" />
+                  <span>Change Profile Picture</span>
+                </button>
+              </div>
+
               <div className="bg-[#101412] border border-[#252B26] rounded-2xl p-6 space-y-4">
                 {!isEditingSelfProfile ? (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
@@ -3715,6 +4030,95 @@ export default function App() {
                   <li>Hyphens in the local name and domain (e.g. <code>Shezan-op@mybusinessmate.ai</code>) are fully supported.</li>
                   <li>Unregistered domains are rejected immediately with HTTP 403 Forbidden on both frontend and API routes.</li>
                 </ul>
+              </div>
+
+              {/* SECTION: ROLE AVATARS & ICON STYLE CATALOG (Section 11, Admin Style Governance) */}
+              <div className="pt-6 border-t border-[#252B26] space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-lg font-bold text-[#E9E8DF] flex items-center space-x-2">
+                      <Palette className="w-5 h-5 text-[#3FAF63]" />
+                      <span>Role Avatars & Icon Style Catalog</span>
+                    </h2>
+                    <p className="text-xs text-[#A5AAA1] mt-0.5">
+                      Vetted icon styles available for Timekeepers, Agents, and Variants. Operatives cannot upload external files; they select strictly from this admin-managed catalog.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAvatarCatalogError('');
+                      setAvatarCatalogSuccess('');
+                      setNewAvatarName('');
+                      setNewAvatarUrl('');
+                      setNewAvatarRoleCategory('all');
+                      setShowAddAvatarModal(true);
+                    }}
+                    className="px-3.5 py-1.5 bg-[#3FAF63] hover:bg-[#52C978] text-[#071009] rounded-lg text-xs font-semibold flex items-center space-x-1.5 self-start sm:self-auto shadow-sm"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Add Icon Style</span>
+                  </button>
+                </div>
+
+                {avatarCatalogSuccess && (
+                  <div className="p-3 bg-[#102719] border border-[#45C46B]/40 text-[#75F09A] text-xs rounded-lg flex items-center space-x-2">
+                    <CheckCircle className="w-4 h-4 shrink-0" />
+                    <span>{avatarCatalogSuccess}</span>
+                  </div>
+                )}
+
+                {/* Grid of Available Avatar Styles */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  {avatarCatalog.map((opt) => (
+                    <div
+                      key={opt.id}
+                      className="bg-[#101412] border border-[#252B26] hover:border-[#34372D] rounded-xl p-4 flex flex-col justify-between space-y-3 transition-all"
+                    >
+                      <div className="flex items-center space-x-3">
+                        <img
+                          src={opt.url}
+                          alt={opt.name}
+                          className="w-12 h-12 rounded-xl object-contain bg-[#080A09] border border-[#252B26] p-1 shrink-0"
+                        />
+                        <div className="overflow-hidden space-y-1">
+                          <div className="text-xs font-bold text-[#E9E8DF] truncate">{opt.name}</div>
+                          <span
+                            className={`text-[9px] px-2 py-0.5 rounded uppercase font-semibold border inline-block ${
+                              opt.roleCategory === 'timekeeper'
+                                ? 'bg-[#29200D] border-[#C9A84E]/40 text-[#D9A441]'
+                                : opt.roleCategory === 'agent'
+                                ? 'bg-[#102719] border-[#45C46B]/40 text-[#75F09A]'
+                                : opt.roleCategory === 'variant'
+                                ? 'bg-[#171D18] border-[#34372D] text-[#A5AAA1]'
+                                : 'bg-[#17201B] border-[#3FAF63]/30 text-[#75F09A]'
+                            }`}
+                          >
+                            {opt.roleCategory === 'all' ? 'All Roles' : opt.roleCategory}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between pt-2 border-t border-[#1F2620] text-[11px]">
+                        {opt.isDefault ? (
+                          <span className="text-[10px] text-[#A5AAA1] font-mono">System Default</span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveAvatarStyle(opt)}
+                            className="text-[#C94B45] hover:text-[#D65D57] flex items-center space-x-1"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            <span>Remove</span>
+                          </button>
+                        )}
+                        <span className="text-[10px] text-[#6F766E] truncate max-w-[120px]" title={opt.url}>
+                          {opt.url}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
 
               {/* DANGER ZONE: CLEAN SLATE USER DATABASE RESET */}
@@ -4288,6 +4692,46 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Initial Avatar Style in Add User Modal */}
+              <div>
+                <label className="text-[#A5AAA1] block mb-1.5 uppercase tracking-wider text-[10px] font-medium">
+                  Avatar / Operative Icon Style (Defaults to {newUserRole.toUpperCase()} standard)
+                </label>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 max-h-32 overflow-y-auto bg-[#0C100E] border border-[#34372D] rounded-xl p-2.5">
+                  {avatarCatalog
+                    .filter((opt) => opt.roleCategory === 'all' || opt.roleCategory === newUserRole)
+                    .map((opt) => {
+                      const isSelected = (newUserAvatarUrl || getRoleDefaultAvatar(newUserRole)) === opt.url;
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => setNewUserAvatarUrl(opt.url)}
+                          className={`p-2 rounded-lg border flex flex-col items-center space-y-1 transition-all text-center ${
+                            isSelected
+                              ? 'bg-[#102719] border-[#45C46B] shadow-[0_0_10px_rgba(69,196,107,0.2)]'
+                              : 'bg-[#171D18] border-[#252B26] hover:border-[#3FAF63]/40'
+                          }`}
+                        >
+                          <img
+                            src={opt.url}
+                            alt={opt.name}
+                            className="w-8 h-8 rounded-lg object-contain bg-[#080A09] p-0.5"
+                          />
+                          <span className="text-[10px] text-[#E9E8DF] font-medium truncate w-full">
+                            {opt.name}
+                          </span>
+                          {isSelected && (
+                            <span className="text-[9px] text-[#45C46B] font-bold flex items-center">
+                              <Check className="w-2.5 h-2.5 mr-0.5" /> Selected
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                </div>
+              </div>
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="text-[#A5AAA1] block mb-1 uppercase tracking-wider text-[10px] font-medium">Company Email *</label>
@@ -4672,6 +5116,46 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Avatar Style Picker in Edit User Modal */}
+              <div>
+                <label className="text-[#A5AAA1] block mb-1.5 uppercase tracking-wider text-[10px] font-medium">
+                  Avatar / Operative Icon Style
+                </label>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 max-h-36 overflow-y-auto bg-[#0C100E] border border-[#34372D] rounded-xl p-2.5">
+                  {avatarCatalog
+                    .filter((opt) => opt.roleCategory === 'all' || opt.roleCategory === editUserRole)
+                    .map((opt) => {
+                      const isSelected = (editUserAvatarUrl || getRoleDefaultAvatar(editUserRole)) === opt.url;
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => setEditUserAvatarUrl(opt.url)}
+                          className={`p-2 rounded-lg border flex flex-col items-center space-y-1.5 transition-all text-center ${
+                            isSelected
+                              ? 'bg-[#102719] border-[#45C46B] shadow-[0_0_10px_rgba(69,196,107,0.2)]'
+                              : 'bg-[#171D18] border-[#252B26] hover:border-[#3FAF63]/40'
+                          }`}
+                        >
+                          <img
+                            src={opt.url}
+                            alt={opt.name}
+                            className="w-10 h-10 rounded-lg object-contain bg-[#080A09] p-0.5"
+                          />
+                          <span className="text-[10px] text-[#E9E8DF] font-medium truncate w-full">
+                            {opt.name}
+                          </span>
+                          {isSelected && (
+                            <span className="text-[9px] text-[#45C46B] font-bold flex items-center">
+                              <Check className="w-2.5 h-2.5 mr-0.5" /> Selected
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                </div>
+              </div>
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="text-[#A5AAA1] block mb-1 uppercase tracking-wider text-[10px] font-medium">Company Email</label>
@@ -4962,6 +5446,231 @@ export default function App() {
                   }`}
                 >
                   Permanently Reset Users
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* --- MODAL: CHOOSE PROFILE AVATAR (ALL USERS - RESTRICTED TO APPROVED STYLES) --- */}
+      {showChooseAvatarModal && currentUser && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#101412] border border-[#252B26] rounded-2xl max-w-lg w-full p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between pb-3 border-b border-[#252B26]">
+              <div>
+                <h3 className="text-base font-bold text-[#E9E8DF] flex items-center space-x-2">
+                  <Palette className="w-4 h-4 text-[#3FAF63]" />
+                  <span>Choose Profile Picture Style</span>
+                </h3>
+                <p className="text-xs text-[#A5AAA1] mt-0.5">
+                  Select your operational visual identity from authorized agency styles.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowChooseAvatarModal(false)}
+                className="text-[#A5AAA1] hover:text-[#E9E8DF]"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Security Policy Reminder */}
+            <div className="p-3 bg-[#0C100E] border border-[#1F2620] rounded-xl text-xs space-y-1">
+              <div className="text-[#3FAF63] font-semibold flex items-center space-x-1.5">
+                <ShieldCheck className="w-3.5 h-3.5" />
+                <span>Enforced Security Policy</span>
+              </div>
+              <p className="text-[11px] text-[#A5AAA1] leading-relaxed">
+                Arbitrary image uploads and untrusted links are disabled across all roles. Operatives can only adopt visual identities vetted and registered by Timekeeper administrators.
+              </p>
+            </div>
+
+            {/* Grid of Allowed Styles for Current User's Role */}
+            <div className="space-y-2">
+              <label className="text-[#A5AAA1] block uppercase tracking-wider text-[10px] font-medium">
+                Authorized Styles for {currentUser.role.toUpperCase()}
+              </label>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 max-h-64 overflow-y-auto p-1">
+                {avatarCatalog
+                  .filter((opt) => opt.roleCategory === 'all' || opt.roleCategory === currentUser.role)
+                  .map((opt) => {
+                    const isSelected = getUserAvatarUrl(currentUser) === opt.url;
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => handleSelectSelfAvatar(opt.url)}
+                        className={`p-3 rounded-xl border flex flex-col items-center space-y-2 text-center transition-all cursor-pointer relative ${
+                          isSelected
+                            ? 'bg-[#102719] border-[#45C46B] shadow-[0_0_15px_rgba(69,196,107,0.25)]'
+                            : 'bg-[#171D18] border-[#252B26] hover:border-[#3FAF63]/50 hover:bg-[#1C241E]'
+                        }`}
+                      >
+                        <div className="w-16 h-16 rounded-xl bg-[#0C100E] border border-[#252B26] p-1.5 flex items-center justify-center">
+                          <img
+                            src={opt.url}
+                            alt={opt.name}
+                            className="w-full h-full object-contain"
+                          />
+                        </div>
+                        <span className="text-xs font-semibold text-[#E9E8DF] truncate w-full">
+                          {opt.name}
+                        </span>
+                        <span
+                          className={`text-[9px] px-1.5 py-0.5 rounded uppercase font-bold border ${
+                            opt.roleCategory === 'timekeeper'
+                              ? 'bg-[#29200D] border-[#C9A84E]/40 text-[#D9A441]'
+                              : opt.roleCategory === 'agent'
+                              ? 'bg-[#102719] border-[#45C46B]/40 text-[#75F09A]'
+                              : opt.roleCategory === 'variant'
+                              ? 'bg-[#171D18] border-[#34372D] text-[#A5AAA1]'
+                              : 'bg-[#17201B] border-[#3FAF63]/30 text-[#75F09A]'
+                          }`}
+                        >
+                          {opt.roleCategory === 'all' ? 'All Roles' : opt.roleCategory}
+                        </span>
+
+                        {isSelected && (
+                          <div className="absolute top-2 right-2 w-5 h-5 rounded-full bg-[#45C46B] text-[#080A09] flex items-center justify-center">
+                            <Check className="w-3 h-3 stroke-[3]" />
+                          </div>
+                        )}
+                      </button>
+                    );
+                  })}
+              </div>
+            </div>
+
+            <div className="flex justify-end pt-3 border-t border-[#1F2620]">
+              <button
+                type="button"
+                onClick={() => setShowChooseAvatarModal(false)}
+                className="px-4 py-2 bg-[#171D18] hover:bg-[#1F2620] text-[#A5AAA1] rounded-lg text-xs"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- MODAL: ADD AVATAR STYLE (TIMEKEEPER ONLY) --- */}
+      {showAddAvatarModal && isTimekeeper && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#101412] border border-[#252B26] rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between pb-3 border-b border-[#252B26]">
+              <div>
+                <h3 className="text-base font-bold text-[#E9E8DF] flex items-center space-x-2">
+                  <Palette className="w-4 h-4 text-[#3FAF63]" />
+                  <span>Register Avatar Style</span>
+                </h3>
+                <p className="text-xs text-[#A5AAA1] mt-0.5">
+                  Add an approved icon style to the organization catalog.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAddAvatarModal(false)}
+                className="text-[#A5AAA1] hover:text-[#E9E8DF]"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {avatarCatalogError && (
+              <div className="p-3 bg-[#2A1110] border border-[#C94B45]/40 text-[#C94B45] text-xs rounded-lg flex items-center space-x-2">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>{avatarCatalogError}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleAddAvatarStyle} className="space-y-4 text-xs">
+              <div>
+                <label className="text-[#A5AAA1] block mb-1 uppercase tracking-wider text-[10px] font-medium">
+                  Style Name *
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Sentinel Special Ops"
+                  value={newAvatarName}
+                  onChange={(e) => setNewAvatarName(e.target.value)}
+                  className="w-full px-3 py-2 bg-[#0C100E] border border-[#34372D] focus:border-[#3FAF63] rounded-lg text-xs text-[#E9E8DF] outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="text-[#A5AAA1] block mb-1 uppercase tracking-wider text-[10px] font-medium">
+                  Image Asset URL / Path *
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. /avatars/special.png or https://..."
+                  value={newAvatarUrl}
+                  onChange={(e) => setNewAvatarUrl(e.target.value)}
+                  className="w-full px-3 py-2 bg-[#0C100E] border border-[#34372D] focus:border-[#3FAF63] rounded-lg text-xs text-[#E9E8DF] outline-none font-mono"
+                />
+                <span className="text-[10px] text-[#6F766E] mt-1 block">
+                  Built-in assets: <code>/avatars/timekeeper.png</code>, <code>/avatars/agent.png</code>, <code>/avatars/variant.png</code>, <code>/logo.png</code>
+                </span>
+              </div>
+
+              <div>
+                <label className="text-[#A5AAA1] block mb-1 uppercase tracking-wider text-[10px] font-medium">
+                  Role Assignment *
+                </label>
+                <select
+                  value={newAvatarRoleCategory}
+                  onChange={(e) => setNewAvatarRoleCategory(e.target.value as UserRole | 'all')}
+                  className="w-full px-3 py-2 bg-[#0C100E] border border-[#34372D] focus:border-[#3FAF63] rounded-lg text-xs text-[#E9E8DF] outline-none"
+                >
+                  <option value="all">Available to All Roles</option>
+                  <option value="timekeeper">Timekeeper Only</option>
+                  <option value="agent">Agent Only</option>
+                  <option value="variant">Variant Only</option>
+                </select>
+              </div>
+
+              {/* Live Preview */}
+              {newAvatarUrl.trim() && (
+                <div className="p-3 bg-[#0C100E] border border-[#252B26] rounded-xl flex items-center space-x-3">
+                  <div className="w-12 h-12 rounded-lg bg-[#101412] border border-[#34372D] flex items-center justify-center p-1 shrink-0">
+                    <img
+                      src={newAvatarUrl.trim()}
+                      alt="Preview"
+                      className="w-full h-full object-contain"
+                      onError={(e) => {
+                        (e.target as HTMLElement).style.display = 'none';
+                      }}
+                    />
+                  </div>
+                  <div>
+                    <div className="text-xs font-semibold text-[#E9E8DF]">
+                      {newAvatarName.trim() || 'Style Preview'}
+                    </div>
+                    <div className="text-[10px] text-[#75F09A]">
+                      Permitted: {newAvatarRoleCategory === 'all' ? 'All Roles' : newAvatarRoleCategory}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex justify-end space-x-2 pt-2 border-t border-[#1F2620]">
+                <button
+                  type="button"
+                  onClick={() => setShowAddAvatarModal(false)}
+                  className="px-4 py-2 bg-[#171D18] hover:bg-[#1F2620] text-[#A5AAA1] rounded-lg"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 bg-[#3FAF63] hover:bg-[#52C978] text-[#071009] rounded-lg font-bold"
+                >
+                  Register Style
                 </button>
               </div>
             </form>
